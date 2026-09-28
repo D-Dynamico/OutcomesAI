@@ -2,7 +2,7 @@
 
 # Start the stack (db, mock-ai, api, worker) in the background
 up:
-	docker compose up --build -d
+	docker compose up --build -d --wait
 
 down:
 	docker compose down

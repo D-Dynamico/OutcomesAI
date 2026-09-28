@@ -41,7 +41,7 @@ Requires Docker with Compose v2; nothing else on the host. **All commands in thi
 
 ```sh
 git clone https://github.com/D-Dynamico/OutcomesAi.git && cd OutcomesAi
-docker compose up --build -d                # or: make up
+docker compose up --build -d --wait         # or: make up (waits until healthy)
 curl localhost:8000/healthz                 # {"status":"ok"}
 make test                                   # full suite against a real Postgres (~2 min)
 ```
@@ -146,7 +146,7 @@ Design §6.7 with production defaults (30 s breaker cooldown), 3 worker containe
 
 ```sh
 # Part 1: start, switch the AI into an outage, post 40 encounters
-docker compose up -d --build --scale worker=3
+docker compose up -d --build --wait --scale worker=3
 curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -d '{"outage": true}'
 for i in $(seq 1 40); do
   curl -s -o /dev/null -X POST localhost:8000/encounters/events -H 'content-type: application/json' \
@@ -155,7 +155,7 @@ done
 # Part 2: repeat these two every ~30 s for ~90 s: the breaker stays open, probes climb, real calls stay flat
 curl -s localhost:8000/metrics | grep -E '^(breaker_state|breaker_probes_sent_total|summary_jobs\{)'
 curl -s localhost:8001/admin/stats
-# Part 3: end the outage, wait ~45 s, then run part 2 once more: breaker closed, 40 ready, 0 failed
+# Part 3: end the outage, then repeat part 2 until 40 are ready (1-2 min: the breaker closes at the next probe, then the queue drains)
 curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -d '{"outage": false}'
 ```
 
@@ -163,7 +163,7 @@ curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -
 |---|---|---|---|
 | t = 5 s | `open` | 40 queued | **12 real**, all failed (tripped at 11, plus 1 in flight) |
 | t = 65 s | `open`, 2 probes sent | 40 queued, all breaching the SLA | still 12 real, **2 synthetic probes** |
-| outage off, +45 s | `closed` after the next probe | **40 ready, 0 failed** | 52 real (12 failed + 40 succeeded), 3 probes |
+| outage off, then drained | `closed` after the next probe | **40 ready, 0 failed** | 52 real (12 failed + 40 succeeded), 3 probes |
 
 GET showed `processing` with `sla_breached: true` throughout, and POSTs were accepted normally. Without the breaker, 40 jobs could each have spent 5 attempts: up to 200 paid calls.
 

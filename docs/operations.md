@@ -98,7 +98,7 @@ A job fails only when its own retry budget runs out, for example when the servic
 
 ```sh
 docker compose down -v
-BACKOFF_BASE_SECONDS=1 docker compose up -d --build
+BACKOFF_BASE_SECONDS=1 docker compose up -d --build --wait
 curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' \
   -d '{"failure_rate": 1, "latency_min_seconds": 0.1, "latency_max_seconds": 0.3, "timeout_hang_seconds": 0}'
 curl -X POST localhost:8000/encounters/events -H 'content-type: application/json' -d '{"event_id":"evt-500","encounter_id":"enc-500","patient_id":"pat-5","encounter_type":"MedicationRefill","version":1,"payload":{"transcription":"Nurse: Hi, this is the refill line. Patient: I need to refill my metformin."}}'
