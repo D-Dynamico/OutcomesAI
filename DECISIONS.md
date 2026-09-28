@@ -198,3 +198,21 @@ The count query itself is unchanged apart from D2's cutoff. After the change, th
 The design's loop calls `try_probe_if_cooldown_passed()` whenever the claim returns no job. The worker runs it only when the claim's step 0 found the breaker not `closed`. When the breaker is closed, the probe race's `WHERE` (open with the cooldown passed, or half-open with the deadline passed) can never match, so skipping it changes nothing and saves a statement on every idle poll. The claim returns a distinct `BREAKER_NOT_CLOSED` value for this case. A non-provider exception during a probe call crashes the loop like any other (D5, D23). The breaker stays `half_open` until `probe_deadline` passes, and then another worker probes.
 
 The lookback is passed as `make_interval(secs => BREAKER_LOOKBACK_MINUTES * 60)`, since `make_interval`'s `mins` argument only takes integers. The cooldown and probe deadline are parameters too.
+
+## D26. Redrive endpoint details
+**Touches:** section 5 ("Failed is terminal; redrive is deliberate"), section 6.7; extends D4.
+
+**`POST /admin/jobs/{job_id}/redrive`**
+- `200 {"job_id": N, "outcome": "redriven"}`: the job was `failed` and still current. It is now `queued`, due immediately, with `redrive_generation + 1` (a fresh budget) and `completed_at` cleared. `attempts`, the fencing token, is untouched.
+- `200 {"job_id": N, "outcome": "superseded", "superseded_by_version": V}`: the job was `failed` but its encounter has since moved on to version V. The job keeps its original `completed_at`.
+- `404 {"error": "job_not_found", "job_id": N}`.
+- `409 {"error": "job_not_failed", "job_id": N, "status": "<status>"}`: redrive applies only to `failed` jobs. A second, concurrent redrive of the same job gets this, because the row lock makes the conditional updates see it as `queued`.
+- `400 invalid_request`: `job_id` is not a positive 64-bit integer.
+
+**`POST /admin/jobs/redrive`** with `{"failed_from": ..., "failed_to": ...}`
+- The window is half-open, `[failed_from, failed_to)`, over `completed_at`.
+- Both bounds must be ISO 8601 timestamps with a timezone, and `failed_from` must be earlier. A timestamp without a timezone is rejected, not guessed.
+- The redrive and supersede updates run set-based, in one transaction, and return `{"redriven": n, "superseded": m}`. Running it again over the same window returns zeros.
+- The IDs of the jobs affected are logged. The response carries only counts.
+
+Job status is operational metadata and carries no patient content. Like every endpoint, these have no authentication (section 8). In a real deployment they would be operator-only.
