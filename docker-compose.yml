@@ -1,8 +1,24 @@
 name: outcomes
 
+# Every tunable can be overridden from the host, e.g. `BACKOFF_BASE_SECONDS=1 docker compose up`.
+# Defaults are the design's values (app/config.py).
 x-app-env: &app-env
   DATABASE_URL: postgresql://outcomes:outcomes@db:5432/outcomes
   MOCK_AI_URL: http://mock-ai:8001
+  LEASE_SECONDS: ${LEASE_SECONDS:-60}
+  AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-30}
+  RETRY_BUDGET: ${RETRY_BUDGET:-5}
+  BACKOFF_BASE_SECONDS: ${BACKOFF_BASE_SECONDS:-10}
+  BREAKER_WINDOW: ${BREAKER_WINDOW:-20}
+  BREAKER_THRESHOLD: ${BREAKER_THRESHOLD:-11}
+  BREAKER_LOOKBACK_MINUTES: ${BREAKER_LOOKBACK_MINUTES:-10}
+  BREAKER_COOLDOWN_SECONDS: ${BREAKER_COOLDOWN_SECONDS:-30}
+  PROBE_DEADLINE_SECONDS: ${PROBE_DEADLINE_SECONDS:-60}
+  SLA_SECONDS: ${SLA_SECONDS:-10}
+  MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+  WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-0.5}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
 
 x-healthcheck-http: &healthcheck-http
   interval: 3s
@@ -26,6 +42,13 @@ services:
 
   mock-ai:
     build: .
+    environment:
+      # Startup defaults; change them at runtime with POST /admin/settings
+      MOCK_LATENCY_MIN_SECONDS: ${MOCK_LATENCY_MIN_SECONDS:-2}
+      MOCK_LATENCY_MAX_SECONDS: ${MOCK_LATENCY_MAX_SECONDS:-8}
+      MOCK_SLOW_RATE: ${MOCK_SLOW_RATE:-0.05}
+      MOCK_FAILURE_RATE: ${MOCK_FAILURE_RATE:-0.05}
+      MOCK_OUTAGE: ${MOCK_OUTAGE:-false}
     command: ["uvicorn", "app.mockai.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001"]
     ports:
       - "8001:8001"   # published so the outage switch can be flipped from the host (demo)
