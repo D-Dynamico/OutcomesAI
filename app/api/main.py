@@ -1,5 +1,5 @@
-# FastAPI app and routes. Ingestion is design section 3 (app/api/ingest.py); read (section 4)
-# and redrive (section 5) are added in later milestones in their own modules.
+# FastAPI app and routes. Ingestion is design section 3 (app/api/ingest.py), read is section 4
+# (app/api/read.py); redrive (section 5) is added in a later milestone in its own module.
 import logging
 from contextlib import asynccontextmanager
 
@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.ingest import InvalidRequest, ingest, parse_event
+from app.api.read import read_summary
 from app.config import Config
 from app.db import apply_schema_url, create_pool
 from app.hooks import Hooks
@@ -60,6 +61,12 @@ def create_app(config: Config | None = None) -> FastAPI:
 
         result = await run_in_threadpool(ingest, app.state.pool, event, app.state.hooks)
         return JSONResponse(result.body, status_code=result.status_code, headers=result.headers)
+
+    # :path so an encounter_id containing "/" (percent-encoded in Location) still routes
+    @app.get("/encounters/{encounter_id:path}/summary")
+    def get_summary(encounter_id: str):
+        result = read_summary(app.state.pool, encounter_id, config.sla_seconds)
+        return JSONResponse(result.body, status_code=result.status_code)
 
     @app.get("/healthz")
     def healthz():

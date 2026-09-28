@@ -5,11 +5,12 @@
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import quote
 
 from psycopg_pool import ConnectionPool
 
+from app.api.response import Response
 from app.hooks import Hooks
 
 log = logging.getLogger("ingest")
@@ -40,13 +41,6 @@ class Event:
     def payload_hash(self) -> bytes:
         # Section 1: hash the transcription string, not the raw JSON body
         return hashlib.sha256(self.transcription.encode("utf-8")).digest()
-
-
-@dataclass
-class Response:
-    status_code: int
-    body: dict
-    headers: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- validation (section 3, "Before the transaction")

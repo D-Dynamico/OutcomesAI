@@ -120,3 +120,13 @@ The body has room for one field. If both `patient_id` and `encounter_type` contr
 **Touches:** section 7 (test harness).
 
 `app/hooks.py` defines named points in ingestion: `ingest.after_lock`, `ingest.before_commit` and `ingest.after_commit`. Tests register in-process callbacks on them, which is how the lock-hold hook and in-process failure injection work. Setting `CRASH_AT=<point>` kills the process there with `os._exit`. Both are inert unless `TEST_HOOKS` is set: `fire()` returns before looking at callbacks or `CRASH_AT`.
+
+## D18. An encounter whose current version has no job returns 404
+**Touches:** section 4 (unknown encounter).
+
+Section 4 says this case is impossible, given single-transaction ingestion, but "has a defined response rather than a crash", without naming the response. It returns the same `404 encounter_not_found` body, the only defined response in that section, and logs `current_version_without_job` with the encounter ID so the inconsistency is visible. A `superseded` job at `current_version` would contradict the guarded write and pre-call check, so it is treated as a bug and returns `500 internal`.
+
+## D19. Timestamp format in responses
+**Touches:** section 4 (GET examples).
+
+`accepted_at` and `completed_at` are RFC 3339 in UTC with a `Z` suffix, truncated to whole seconds (`2026-09-18T10:04:11Z`), matching the design's examples. `sla_breached` is computed in SQL from full-precision timestamps and Postgres `now()`, so truncation never affects it.
