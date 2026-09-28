@@ -199,7 +199,7 @@ def test_precall_check_is_fenced(api, db, pool, mock, make_worker):
 
     ev = make_event(version=12)
     post(api, ev)
-    job = claim(pool, "w-A", 60)
+    job = claim(pool, "w-A", 60, 5)
     db.execute("UPDATE summary_jobs SET attempts = attempts + 1 WHERE job_id = %s", (job.job_id,))
     post(api, make_event(encounter_id=ev["encounter_id"], version=13))
 

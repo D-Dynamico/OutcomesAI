@@ -1,11 +1,10 @@
 # Design section 5, "Worker flow". Three short transactions; generate_summary runs outside
 # all of them, holding no connection, lock or open transaction.
 #
-# Milestone status: claim (without the reclaim budget check), pre-call check, the call,
-# guarded write and discarded are in place. The transient-error path and the reclaim budget
-# check arrive in milestone 5, the circuit breaker in milestone 6.
+# The circuit breaker (claim gate and probe) arrives in milestone 6.
 import logging
 import os
+import random
 import signal
 import socket
 import sys
@@ -19,7 +18,7 @@ from app.hooks import Hooks
 from app.summary.client import HttpSummaryClient, SummaryClient, TransientError
 from app.worker.claim import claim
 from app.worker.precall import precall_supersede
-from app.worker.result import guarded_write, mark_attempt_discarded
+from app.worker.result import guarded_write, mark_attempt_discarded, record_failure
 
 log = logging.getLogger("worker")
 
@@ -28,20 +27,26 @@ class Worker:
     """One worker loop. A process runs WORKER_CONCURRENCY of these, each with its own worker_id."""
 
     def __init__(self, pool: ConnectionPool, client: SummaryClient, config: Config,
-                 worker_id: str, hooks: Hooks | None = None):
+                 worker_id: str, hooks: Hooks | None = None, rng: random.Random | None = None):
         self.pool = pool
         self.client = client
         self.config = config
         self.worker_id = worker_id
         self.hooks = hooks or Hooks(enabled=False)
+        self.rng = rng or random.Random()   # backoff jitter
 
     def run_once(self) -> str:
         """One pass of the loop. Returns what happened, for tests and logs."""
-        job = claim(self.pool, self.worker_id, self.config.lease_seconds)   # txn 1
+        job = claim(self.pool, self.worker_id, self.config.lease_seconds,
+                    self.config.retry_budget)                                   # txn 1
         if job is None:
             return "idle"
         ids = {"job_id": job.job_id, "encounter_id": job.encounter_id, "version": job.version,
                "attempt_no": job.my_attempt, "worker_id": self.worker_id}
+        if job.failed_on_reclaim:
+            # Budget spent by abandoned attempts: a crash signature, surfaced as worker_lost
+            log.warning("failed_on_reclaim", extra=ids)
+            return "failed_on_reclaim"
         log.info("claimed", extra={**ids, "reclaimed": job.reclaimed})
         self.hooks.fire("worker.after_claim", worker=self, job=job)
 
@@ -53,10 +58,16 @@ class Worker:
         try:
             summary = self.client.generate_summary(job.input_transcription)  # no transaction open
         except TransientError as e:
-            # Milestone 5 replaces this with record_failure (queued + backoff, or failed).
-            # Until then the attempt stays in_flight and the lease expiry reclaims the job.
-            log.warning("transient_error", extra={**ids, "error_class": e.error_class})
-            return "transient_error"
+            status = record_failure(self.pool, job, e.error_class,                  # txn 3a
+                                    budget=self.config.retry_budget,
+                                    backoff_base_seconds=self.config.backoff_base_seconds,
+                                    rng=self.rng)
+            if status is None:
+                log.warning("transient_error_after_lost_ownership",
+                            extra={**ids, "error_class": e.error_class})
+                return "lost_ownership"
+            log.warning("transient_error", extra={**ids, "error_class": e.error_class, "job_status": status})
+            return "failed" if status == "failed" else "transient_error"
         self.hooks.fire("worker.after_call", worker=self, job=job)
 
         status = guarded_write(self.pool, job, summary)                      # txn 3b

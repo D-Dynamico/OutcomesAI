@@ -100,7 +100,7 @@ def mock():
 
 @pytest.fixture
 def make_worker(pool, mock, worker_config):
-    def make(worker_id="w-A", client=None, hooks=None):
+    def make(worker_id="w-A", client=None, hooks=None, rng=None):
         return Worker(pool, client or mock, worker_config, worker_id,
-                      hooks or Hooks(enabled=True))
+                      hooks or Hooks(enabled=True), rng=rng)
     return make

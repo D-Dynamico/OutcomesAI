@@ -136,6 +136,7 @@ Section 4 says this case is impossible, given single-transaction ingestion, but 
 
 - **Guarded write:** the `CASE ... THEN 'ready' ELSE 'superseded' END` is cast to `::job_status`. Postgres types a `CASE` of string literals as `text`, which can't be assigned to an enum column. `RETURNING j.status::text` returns a plain string.
 - **Claim:** the lease is `now() + make_interval(secs => :lease_seconds)` instead of the literal `interval '60 seconds'`, so `LEASE_SECONDS` configures it. The default is still 60.
+- **Transient-error path:** the `queued`/`failed` `CASE` gets the same `::job_status` cast. The budget and backoff are parameters (`RETRY_BUDGET`, and `next_attempt_at = now() + make_interval(secs => :backoff_seconds)`) instead of the literal `5` and `:backoff`. The reclaim budget check in the claim compares against `RETRY_BUDGET` too.
 
 Everything else matches the design's text.
 

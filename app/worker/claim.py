@@ -38,6 +38,24 @@ UPDATE job_attempts
 RETURNING attempt_no
 """
 
+# Step 3, reclaims only: the retry budget. A worker that crashed never reached the
+# transient-error write, so the reclaiming worker is where the budget is applied.
+BUDGET_USED = """
+SELECT count(*) AS used
+  FROM job_attempts
+ WHERE job_id = %(job_id)s
+   AND redrive_generation = %(redrive_generation)s
+   AND outcome <> 'skipped'
+"""
+
+# If used >= budget: fail the job instead of starting a new attempt. attempt_no then skips a
+# value, which fencing tolerates (section 5, "A side effect: gaps in attempt numbers").
+FAIL_ON_RECLAIM = """
+UPDATE summary_jobs
+   SET status = 'failed', completed_at = now(), lease_expires_at = NULL
+ WHERE job_id = %(job_id)s AND attempts = %(my_attempt)s
+"""
+
 # Step 4: open this attempt
 OPEN_ATTEMPT = """
 INSERT INTO job_attempts (job_id, attempt_no, redrive_generation, worker_id)
@@ -54,9 +72,10 @@ class ClaimedJob:
     my_attempt: int            # fencing token carried to every later write
     redrive_generation: int
     reclaimed: bool            # step 2 closed out a previous owner's attempt
+    failed_on_reclaim: bool = False   # step 3 found the budget spent; the job is now failed
 
 
-def claim(pool: ConnectionPool, worker_id: str, lease_seconds: float) -> ClaimedJob | None:
+def claim(pool: ConnectionPool, worker_id: str, lease_seconds: float, budget: int) -> ClaimedJob | None:
     with transaction(pool) as conn:
         row = conn.execute(TAKE_JOB, {"lease_seconds": lease_seconds}).fetchone()
         if row is None:
@@ -67,7 +86,12 @@ def claim(pool: ConnectionPool, worker_id: str, lease_seconds: float) -> Claimed
 
         reclaimed = bool(conn.execute(CLOSE_ABANDONED, params).fetchall())
 
-        conn.execute(OPEN_ATTEMPT, params)
+        if reclaimed and conn.execute(BUDGET_USED, params).fetchone()[0] >= budget:
+            conn.execute(FAIL_ON_RECLAIM, params)
+            failed_on_reclaim = True     # steps 4 onwards are skipped
+        else:
+            conn.execute(OPEN_ATTEMPT, params)
+            failed_on_reclaim = False
 
     return ClaimedJob(job_id, encounter_id, version, input_transcription, my_attempt,
-                      redrive_generation, reclaimed)
+                      redrive_generation, reclaimed, failed_on_reclaim)
