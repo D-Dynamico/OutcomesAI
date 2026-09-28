@@ -1,6 +1,7 @@
 # Design section 5: writing the result (txn 3b, the guarded write), marking the attempt
 # discarded on lost ownership, and the transient-error path (txn 3a).
 import random
+from dataclasses import dataclass
 
 from psycopg_pool import ConnectionPool
 
@@ -23,7 +24,10 @@ UPDATE summary_jobs j
    AND e.encounter_id  = j.encounter_id
    AND j.status        = 'processing'
    AND j.attempts      = %(my_attempt)s
-RETURNING j.status::text
+RETURNING j.status::text,
+          extract(epoch FROM j.started_at   - j.accepted_at)::float,   -- queue wait
+          extract(epoch FROM j.completed_at - j.started_at)::float,    -- processing time
+          extract(epoch FROM j.completed_at - j.accepted_at)::float    -- the SLA measure
 """
 
 # Same transaction as the guarded write
@@ -43,16 +47,25 @@ UPDATE job_attempts
 """
 
 
-def guarded_write(pool: ConnectionPool, job: ClaimedJob, summary: str) -> str | None:
-    """Returns 'ready' or 'superseded', or None if this worker no longer owns the job."""
+@dataclass(frozen=True)
+class WriteResult:
+    status: str                   # 'ready' or 'superseded'
+    queue_wait_seconds: float     # durations from database timestamps, for the section 7 histograms
+    processing_seconds: float
+    completion_seconds: float
+
+
+def guarded_write(pool: ConnectionPool, job: ClaimedJob, summary: str) -> WriteResult | None:
+    """None if this worker no longer owns the job."""
     params = {"job_id": job.job_id, "my_attempt": job.my_attempt, "summary": summary}
     with transaction(pool) as conn:
         row = conn.execute(GUARDED_WRITE, params).fetchone()
         if row is None:
             return None
-        status = row[0]
-        conn.execute(CLOSE_ATTEMPT, {**params, "outcome": "succeeded" if status == "ready" else "superseded"})
-    return status
+        result = WriteResult(*row)
+        conn.execute(CLOSE_ATTEMPT, {**params,
+                                     "outcome": "succeeded" if result.status == "ready" else "superseded"})
+    return result
 
 
 def mark_attempt_discarded(pool: ConnectionPool, job: ClaimedJob) -> None:

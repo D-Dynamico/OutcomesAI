@@ -37,6 +37,7 @@ class Config:
     # Worker process shape (DECISIONS.md D9)
     worker_poll_seconds: float = 0.5
     worker_concurrency: int = 4
+    worker_metrics_port: int = 9100   # 0 disables; never published to the host
 
     mock_ai_url: str = "http://mock-ai:8001"
 

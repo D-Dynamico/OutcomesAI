@@ -10,11 +10,16 @@ import sys
 import threading
 import time
 
+from prometheus_client import start_http_server
 from psycopg_pool import ConnectionPool
 
 from app.config import Config
 from app.db import apply_schema_url, create_pool
 from app.hooks import Hooks
+from app.logs import configure_logging
+from app.metrics import (AI_CALL_SECONDS, AI_CALLS, ATTEMPTS_CLOSED, BREAKER_TRIPS, COMPLETION_TIME,
+                         JOBS_FAILED, PROBES, PROCESSING_TIME, QUEUE_WAIT, WORKER_BUSY,
+                         WORKER_REGISTRY, WORKER_SLOTS)
 from app.summary.client import PROBE_TRANSCRIPT, HttpSummaryClient, SummaryClient, TransientError
 from app.worker.breaker import BreakerSettings, report_probe, start_probe
 from app.worker.claim import BREAKER_NOT_CLOSED, claim
@@ -45,44 +50,81 @@ class Worker:
             return self.try_probe()
         if job is None:
             return "idle"
+        WORKER_BUSY.inc()
+        try:
+            return self._process(job)
+        finally:
+            WORKER_BUSY.dec()
+
+    def _process(self, job) -> str:
         ids = {"job_id": job.job_id, "encounter_id": job.encounter_id, "version": job.version,
                "attempt_no": job.my_attempt, "worker_id": self.worker_id}
+        if job.reclaimed:
+            ATTEMPTS_CLOSED.labels("lease_expired", "worker_lost").inc()
         if job.failed_on_reclaim:
             # Budget spent by abandoned attempts: a crash signature, surfaced as worker_lost
+            JOBS_FAILED.labels("reclaim").inc()
             log.warning("failed_on_reclaim", extra=ids)
             return "failed_on_reclaim"
         log.info("claimed", extra={**ids, "reclaimed": job.reclaimed})
         self.hooks.fire("worker.after_claim", worker=self, job=job)
 
         if precall_supersede(self.pool, job):                                # txn 2
+            ATTEMPTS_CLOSED.labels("skipped", "").inc()
             log.info("skipped_superseded", extra=ids)
             return "skipped"
 
         self.hooks.fire("worker.before_call", worker=self, job=job)
         try:
-            summary = self.client.generate_summary(job.input_transcription)  # no transaction open
+            summary = self._call("real", job.input_transcription)            # no transaction open
         except TransientError as e:
             status, tripped = record_failure(self.pool, job, e.error_class,         # txn 3a
                                              budget=self.config.retry_budget,
                                              backoff_base_seconds=self.config.backoff_base_seconds,
                                              rng=self.rng, breaker=self.breaker)
             if tripped:
+                BREAKER_TRIPS.inc()
                 log.warning("breaker_opened", extra={"worker_id": self.worker_id})
             if status is None:
                 log.warning("transient_error_after_lost_ownership",
                             extra={**ids, "error_class": e.error_class})
                 return "lost_ownership"
+            ATTEMPTS_CLOSED.labels("transient_error", e.error_class).inc()
+            if status == "failed":
+                JOBS_FAILED.labels("transient").inc()
             log.warning("transient_error", extra={**ids, "error_class": e.error_class, "job_status": status})
             return "failed" if status == "failed" else "transient_error"
         self.hooks.fire("worker.after_call", worker=self, job=job)
 
-        status = guarded_write(self.pool, job, summary)                      # txn 3b
-        if status is None:
+        result = guarded_write(self.pool, job, summary)                      # txn 3b
+        if result is None:
             mark_attempt_discarded(self.pool, job)
+            ATTEMPTS_CLOSED.labels("discarded", "worker_lost").inc()
             log.warning("discarded", extra=ids)
             return "discarded"
-        log.info("result_written", extra={**ids, "status": status})
-        return status
+        if result.status == "ready":
+            ATTEMPTS_CLOSED.labels("succeeded", "").inc()
+            QUEUE_WAIT.observe(result.queue_wait_seconds)
+            PROCESSING_TIME.observe(result.processing_seconds)
+            COMPLETION_TIME.observe(result.completion_seconds)
+        else:
+            ATTEMPTS_CLOSED.labels("superseded", "").inc()
+        log.info("result_written", extra={**ids, "status": result.status,
+                                          "completion_seconds": round(result.completion_seconds, 3)})
+        return result.status
+
+    def _call(self, kind: str, transcription: str) -> str:
+        """One paid generate_summary call, counted and timed (section 7)."""
+        started = time.monotonic()
+        try:
+            summary = self.client.generate_summary(transcription)
+        except TransientError as e:
+            AI_CALLS.labels(kind, e.error_class).inc()
+            raise
+        finally:
+            AI_CALL_SECONDS.labels(kind).observe(time.monotonic() - started)
+        AI_CALLS.labels(kind, "succeeded").inc()
+        return summary
 
     def try_probe(self) -> str:
         """Section 5, probing. Only reached when the breaker is not closed; with it closed the
@@ -93,17 +135,20 @@ class Worker:
         ids = {"worker_id": self.worker_id, "probe_generation": my_probe}
         log.info("probe_sent", extra=ids)
         try:
-            self.client.generate_summary(PROBE_TRANSCRIPT)       # synthetic; no job, no budget
+            self._call("probe", PROBE_TRANSCRIPT)                # synthetic; no job, no budget
             succeeded, error_class = True, None
         except TransientError as e:
             succeeded, error_class = False, e.error_class
         if not report_probe(self.pool, my_probe, succeeded, self.breaker):
             # Our deadline passed and another worker probed; its verdict stands
+            PROBES.labels("fenced").inc()
             log.warning("probe_result_fenced", extra=ids)
             return "probe_lost"
         if succeeded:
+            PROBES.labels("succeeded").inc()
             log.info("breaker_closed", extra=ids)
             return "probe_succeeded"
+        PROBES.labels("failed").inc()
         log.warning("probe_failed", extra={**ids, "error_class": error_class})
         return "probe_failed"
 
@@ -160,7 +205,7 @@ def run_loops(workers: list[Worker], stop: threading.Event, drain_seconds: float
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging("worker")
     config = Config.from_env()
     config.validate_worker()
     apply_schema_url(config.database_url)
@@ -175,6 +220,10 @@ def main() -> None:
     workers = [Worker(pool, HttpSummaryClient(config.mock_ai_url, config.ai_timeout_seconds),
                       config, f"{base_id}-{slot}", hooks)
                for slot in range(config.worker_concurrency)]
+    WORKER_SLOTS.set(config.worker_concurrency)
+    if config.worker_metrics_port:
+        # Internal only: not published to the host (DECISIONS.md D10)
+        start_http_server(config.worker_metrics_port, registry=WORKER_REGISTRY)
     log.info("worker started", extra={"worker_id": base_id, "slots": config.worker_concurrency})
 
     code = run_loops(workers, stop, config.ai_timeout_seconds + DRAIN_WRITE_MARGIN_SECONDS)

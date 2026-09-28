@@ -216,3 +216,40 @@ The lookback is passed as `make_interval(secs => BREAKER_LOOKBACK_MINUTES * 60)`
 - The IDs of the jobs affected are logged. The response carries only counts.
 
 Job status is operational metadata and carries no patient content. Like every endpoint, these have no authentication (section 8). In a real deployment they would be operator-only.
+
+## D27. Metrics and logs in detail
+**Touches:** section 5 ("SLA detection"), section 7 ("Observability", "No patient content anywhere in the telemetry"); extends D10.
+
+**API `/metrics`, per process:**
+- `ingest_events_total{outcome}`: the five ingestion outcomes, plus `invalid_request` and `payload_too_large`.
+- `ingest_duplicate_source_defects_total`.
+- `ingest_identity_conflicts_total`: the dedicated metric from section 6.8.
+- `ingest_payload_conflicts_total`.
+
+**API `/metrics`, read from Postgres on each scrape** (`app/metrics.py:DatabaseCollector`):
+- `summary_queue_depth{state=due_now|waiting_backoff|processing}`.
+- The section 5 SLA check, verbatim: `summary_sla_breaching_jobs`, `_queued` and `_processing`, and `summary_sla_oldest_unfinished_age_seconds`.
+  - Following the design's SQL, the age is taken over breaching jobs only, so it is 0 when none breach.
+  - The scrape interval is the design's "every few seconds".
+- `summary_jobs{status}`: the failed count backs the "any job reaches failed" alert.
+- `breaker_state{state}`, `breaker_open_seconds` (for the "breaker open for more than a few minutes" alert), and `breaker_probes_sent_total`.
+- `summary_db_up`: if the database can't be read, the scrape still succeeds with `summary_db_up 0`.
+
+`summary_jobs{status}` counts the whole table on every scrape. That's fine at this scale. At high volume, a partial index or a sampled count would replace it.
+
+**Worker `:WORKER_METRICS_PORT` (9100), per process, never published to the host:**
+- `generate_summary_calls_total{kind=real|probe, result}` and `generate_summary_call_seconds{kind}`: spend rate and latency.
+- `job_attempts_closed_total{outcome, error_class}`: counts transitions, so an attempt closed as `lease_expired` by the reclaimer and later rewritten to `discarded` (D1) counts once for each.
+- `summary_jobs_failed_total{path=transient|reclaim}` and `breaker_trips_total`.
+- `breaker_probes_total{result=succeeded|failed|fenced}`.
+- `worker_slots` and `worker_busy_slots`.
+- For jobs reaching `ready`: `summary_queue_wait_seconds`, `summary_processing_seconds` and `summary_completion_seconds`. These three durations come from the result write's `RETURNING`, so they use database timestamps (the guarded write's `RETURNING` gains these three expressions; its `WHERE` and `SET` are unchanged). Call latency is a local duration, not a time comparison.
+
+With `--scale worker=N`, each replica is scraped separately: Docker's DNS returns every replica for the `worker` service name.
+
+Labels are fixed enum values only, with no IDs.
+
+**Logs:** one JSON object per line, from every service and from third-party loggers (uvicorn is routed through the same formatter). Each line has `ts`, `level`, `service`, `logger`, and `event` (the message), plus the structured fields.
+- **Exceptions:** only the exception type (`error_type`) is written. The message and traceback never are, because exception text can carry request data. This covers uvicorn's own "Exception in ASGI application".
+- **httpx:** its per-request INFO lines are silenced.
+- **Tests:** `tests/test_observability.py` drives every ingestion outcome, a 500 whose exception message *is* the transcript, a transient error and a success, with a distinctive transcript and summary. It checks that neither appears in any log line, and that patient IDs appear only in the `identity_conflict` line.

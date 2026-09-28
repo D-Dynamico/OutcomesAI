@@ -4,7 +4,8 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response as RawResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.concurrency import run_in_threadpool
 
 from app.api.admin import parse_window, redrive_job, redrive_window
@@ -13,6 +14,8 @@ from app.api.read import read_summary
 from app.config import Config
 from app.db import apply_schema_url, create_pool
 from app.hooks import Hooks
+from app.logs import configure_logging
+from app.metrics import API_REGISTRY, INGEST_EVENTS, Combined, DatabaseCollector
 
 log = logging.getLogger("api")
 
@@ -21,6 +24,7 @@ EXPECTED_TABLES = ("encounters", "encounter_events", "summary_jobs", "job_attemp
 
 def create_app(config: Config | None = None) -> FastAPI:
     config = config or Config.from_env()
+    configure_logging("api")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -48,19 +52,23 @@ def create_app(config: Config | None = None) -> FastAPI:
             {"error": "payload_too_large", "max_bytes": config.max_body_bytes}, status_code=413)
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit() and int(declared) > config.max_body_bytes:
+            INGEST_EVENTS.labels("payload_too_large").inc()
             return too_large
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > config.max_body_bytes:
+                INGEST_EVENTS.labels("payload_too_large").inc()
                 return too_large
 
         try:
             event = parse_event(bytes(body))
         except InvalidRequest as e:
+            INGEST_EVENTS.labels("invalid_request").inc()
             return JSONResponse({"error": "invalid_request", "detail": e.detail}, status_code=400)
 
         result = await run_in_threadpool(ingest, app.state.pool, event, app.state.hooks)
+        INGEST_EVENTS.labels(result.body["outcome"]).inc()
         return JSONResponse(result.body, status_code=result.status_code, headers=result.headers)
 
     # :path so an encounter_id containing "/" (percent-encoded in Location) still routes
@@ -90,6 +98,12 @@ def create_app(config: Config | None = None) -> FastAPI:
                                 status_code=400)
         result = redrive_job(app.state.pool, int(job_id))
         return JSONResponse(result.body, status_code=result.status_code)
+
+    # Section 7 metrics. Database gauges are read on each scrape (DECISIONS.md D10, D27).
+    @app.get("/metrics")
+    def metrics():
+        collector = Combined(API_REGISTRY, DatabaseCollector(app.state.pool, config.sla_seconds))
+        return RawResponse(generate_latest(collector), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/healthz")
     def healthz():

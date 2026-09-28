@@ -40,7 +40,8 @@ def test_real_worker_process_against_mock_ai(api, db, fresh_db, mock_ai):
         encounters.append(ev["encounter_id"])
 
     env = {**os.environ, "DATABASE_URL": fresh_db, "MOCK_AI_URL": MOCK_AI_URL,
-           "WORKER_CONCURRENCY": "2", "DB_POOL_SIZE": "3", "WORKER_POLL_SECONDS": "0.1"}
+           "WORKER_CONCURRENCY": "2", "DB_POOL_SIZE": "3", "WORKER_POLL_SECONDS": "0.1",
+           "WORKER_METRICS_PORT": "9187"}
     worker = subprocess.Popen([sys.executable, "-m", "app.worker.main"], env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -52,6 +53,11 @@ def test_real_worker_process_against_mock_ai(api, db, fresh_db, mock_ai):
                 break
             time.sleep(0.2)
         assert statuses == ["ready"] * 3
+
+        # The worker's internal metrics port (DECISIONS.md D10)
+        metrics = httpx.get("http://127.0.0.1:9187/metrics", timeout=5).text
+        assert 'generate_summary_calls_total{kind="real",result="succeeded"} 3.0' in metrics
+        assert "worker_slots 2.0" in metrics
     finally:
         worker.send_signal(signal.SIGTERM)
         assert worker.wait(timeout=15) == 0   # graceful shutdown

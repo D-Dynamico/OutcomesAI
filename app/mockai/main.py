@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, fields
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.logs import configure_logging
 from app.summary.client import PROBE_TRANSCRIPT
 
 PHRASES = (
@@ -77,6 +78,7 @@ class Counters:
 
 def create_app(settings: MockSettings | None = None, rng: random.Random | None = None,
                sleep=asyncio.sleep) -> FastAPI:
+    configure_logging("mock-ai")
     app = FastAPI(title="Mock generate_summary")
     app.state.settings = settings or MockSettings.from_env()
     app.state.counters = Counters()

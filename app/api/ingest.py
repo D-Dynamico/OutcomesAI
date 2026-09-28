@@ -12,6 +12,7 @@ from psycopg_pool import ConnectionPool
 
 from app.api.response import Response
 from app.hooks import Hooks
+from app.metrics import INGEST_IDENTITY_CONFLICTS, INGEST_PAYLOAD_CONFLICTS, INGEST_SOURCE_DEFECTS
 
 log = logging.getLogger("ingest")
 
@@ -168,6 +169,7 @@ def ingest(pool: ConnectionPool, event: Event, hooks: Hooks) -> Response:
                     "stored_patient_id": stored_patient, "incoming_patient_id": event.patient_id,
                     "stored_encounter_type": stored_type, "incoming_encounter_type": event.encounter_type,
                 })
+                INGEST_IDENTITY_CONFLICTS.inc()   # dedicated metric (section 1, section 6.8)
                 return _identity_conflict(event, current_version, conflicting_field)
 
             # Step 3: insert the event; a PK or unique hit is a duplicate or a payload conflict
@@ -221,6 +223,7 @@ def _classify_seen_event(event: Event, current_version: int, matches: list[tuple
             # Section 1: same (encounter_id, version) under a fresh event_id is a partner defect
             log.warning("duplicate_source_defect", extra={
                 **ids, "recorded_event_ids": [eid for eid, *_ in matches]})
+            INGEST_SOURCE_DEFECTS.inc()
         else:
             log.info("duplicate", extra=ids)
         return _plain_outcome("duplicate", event, current_version)
@@ -231,6 +234,7 @@ def _classify_seen_event(event: Event, current_version: int, matches: list[tuple
         "recorded": [{"event_id": eid, "encounter_id": enc, "version": ver, "payload_hash": bytes(h).hex()}
                      for eid, enc, ver, h in matches],
     })
+    INGEST_PAYLOAD_CONFLICTS.inc()
     return Response(409, {
         "outcome": "payload_conflict",
         "encounter_id": event.encounter_id,
