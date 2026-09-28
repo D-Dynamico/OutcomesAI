@@ -185,14 +185,14 @@ The concurrency tests force the interleaving, not just hope for it. A barrier re
 
 ## Departures from the design
 
-Every interpretation is in [`DECISIONS.md`](DECISIONS.md). These are the ones that change behaviour:
+The ones that change behaviour; the reasoning for each is in [`DECISIONS.md`](DECISIONS.md):
 
-- **D24: the breaker trip check locks the breaker row before counting.** The design's plain `SELECT` undercounts under concurrency: several workers each see 10 failures, and none trips at 11. The repeated outage test found real calls of 15–16 before this fix.
-- **D2:** the trip check ignores attempts that finished before the breaker last closed, so recovery isn't undone by the failures that caused the outage.
-- **D1:** a stalled worker's late successful call turns its `lease_expired` attempt into `discarded`, the only path by which `discarded` can be written.
-- **D7:** a retried `event_id` is a duplicate only if the recorded event has the same encounter, version *and* payload hash. Anything else is `409 payload_conflict`.
-- **D21:** the 30 s AI timeout is a total deadline, not just per-read, because the lease > timeout rule depends on it.
-- **D23:** after a non-provider error, or on SIGTERM, a worker stops claiming and lets in-flight (possibly paid) calls finish before exiting.
+- **D24:** the breaker check locks its row before counting; the design's plain count undercounted under concurrency (found by testing).
+- **D2:** after recovery, only failures since the breaker last closed count.
+- **D1:** a stalled worker's late result marks its attempt `discarded`.
+- **D7:** a reused `event_id` is a duplicate only if encounter, version and content all match; otherwise `409`.
+- **D21:** the 30 s AI timeout is a total deadline, not per read.
+- **D23:** a crashing or stopping worker finishes its in-flight calls before exiting.
 
 ## Known limitations
 
