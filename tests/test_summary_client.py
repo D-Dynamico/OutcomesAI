@@ -1,5 +1,9 @@
 # The HTTP provider client maps every failure to a fixed error_class and never keeps
 # provider text (design section 4, section 7; DECISIONS.md D5).
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import httpx
 import pytest
 
@@ -59,28 +63,83 @@ def test_malformed_success_is_internal(response):
     assert exc.value.error_class == "internal"
 
 
-def test_client_timeout_is_enforced_against_a_hanging_provider():
-    # The worker's own timeout, independent of the provider
-    import threading
-    import time
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+# ---------------------------------------------------------------- the total deadline (D21)
+# Real sockets, so the timeouts under test are the real ones. Each misbehaving server would
+# take about 3 s; the client's deadline is 0.5 s.
 
-    class Hang(BaseHTTPRequestHandler):
-        def do_POST(self):
-            time.sleep(3)
+class _Quiet(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
 
-        def log_message(self, *args):
-            pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Hang)
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        c = HttpSummaryClient(f"http://127.0.0.1:{server.server_port}", 0.3)
-        start = time.monotonic()
-        with pytest.raises(TransientError) as exc:
-            c.generate_summary("t")
-        assert exc.value.error_class == "ai_timeout"
-        assert time.monotonic() - start < 2
-    finally:
+class Hang(_Quiet):
+    def do_POST(self):
+        time.sleep(3)
+
+
+class TrickleBody(_Quiet):
+    # Headers promptly, then one body byte every 0.1 s: each read is well inside the per-read
+    # timeout, so only a total deadline stops it
+    def do_POST(self):
+        body = b'{"summary": "' + b"x" * 30 + b'"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        for i in range(len(body)):
+            self.wfile.write(body[i:i + 1])
+            self.wfile.flush()
+            time.sleep(0.1)
+
+
+class TrickleHeaders(_Quiet):
+    # The status line and headers themselves arrive one byte every 0.1 s
+    def do_POST(self):
+        body = b'{"summary": "s"}'
+        crlf = bytes([13, 10])
+        raw = (b"HTTP/1.1 200 OK" + crlf + b"Content-Type: application/json" + crlf
+               + b"X-Padding: " + b"p" * 30 + crlf
+               + b"Content-Length: " + str(len(body)).encode() + crlf + crlf + body)
+        for i in range(len(raw)):
+            self.wfile.write(raw[i:i + 1])
+            self.wfile.flush()
+            time.sleep(0.1)
+
+
+@pytest.fixture
+def serve():
+    servers = []
+
+    def start(handler):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    yield start
+    for server in servers:
         server.shutdown()
+
+
+@pytest.mark.parametrize("handler", [Hang, TrickleBody, TrickleHeaders])
+def test_total_deadline_bounds_the_whole_call(serve, handler):
+    c = HttpSummaryClient(serve(handler), 0.5)
+    start = time.monotonic()
+    with pytest.raises(TransientError) as exc:
+        c.generate_summary("t")
+    assert exc.value.error_class == "ai_timeout"
+    assert time.monotonic() - start < 1.5
+
+
+def test_a_slow_but_in_time_response_succeeds(serve):
+    class Slowish(_Quiet):
+        def do_POST(self):
+            time.sleep(0.2)
+            body = b'{"summary": "ok"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    assert HttpSummaryClient(serve(Slowish), 1).generate_summary("t") == "ok"

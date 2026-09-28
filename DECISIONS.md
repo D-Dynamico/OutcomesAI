@@ -95,7 +95,7 @@ The design reads and updates the `'generate_summary'` row but never inserts it. 
 ## D13. Document locations
 **Touches:** CLAUDE.md (source of truth).
 
-`encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. The original brief is `docs/BE_ClinicalAI_T_Encounters.pdf`. `docs/design.md` is git-ignored, so a fresh clone has only the brief and the submitted report.
+`encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. The original brief is `docs/BE_ClinicalAI_T_Encounters.pdf`. All three are committed, so a reviewer can check every section reference against the spec.
 
 ## D14. Error bodies for 400, 413 and 500
 **Touches:** section 3 ("Before the transaction"), section 4 (POST).
@@ -115,6 +115,8 @@ The body has room for one field. If both `patient_id` and `encounter_type` contr
 **Touches:** section 4 (accepted).
 
 `Location: /encounters/{encounter_id}/summary`, with the ID percent-encoded (`quote(id, safe="")`) so IDs containing `/`, spaces or `?` still produce a valid path.
+
+Starlette decodes `%2F` to `/` before routing, so a plain `{encounter_id}` segment would not match an ID containing `/`. The GET route is declared as `/encounters/{encounter_id:path}/summary`. `tests/test_read.py::test_get_via_location_header_with_encoded_id` checks the round trip: it POSTs an event with encounter ID `enc/1 x?`, then GETs the returned `Location`.
 
 ## D17. Test hooks and crash injection
 **Touches:** section 7 (test harness).
@@ -143,9 +145,14 @@ Everything else matches the design's text.
 ## D21. How the 30-second client timeout is enforced
 **Touches:** section 0 (assumptions), section 5 (lease > AI timeout).
 
-`HttpSummaryClient` uses an httpx timeout of `AI_TIMEOUT_SECONDS` for connecting, each read and each write. The provider sends its response in one piece, so this bounds the whole call. A test checks it against a hanging server. A provider that sent its response a trickle at a time could outlast it. Against a real provider, a total-deadline wrapper would be the fix.
+The lease > AI timeout rule depends on the timeout bounding the *whole* call, so `HttpSummaryClient` enforces it in two layers:
 
-Status mapping: 429 → `rate_limited`, 503 and other 5xx → `ai_unavailable`, 504 or a client timeout → `ai_timeout`, a connection failure → `ai_unavailable`. Any other status, a malformed body, or an unexpected exception from the call → `internal` (D5). The provider's error text is discarded, and the original exception is suppressed from tracebacks.
+- **A total deadline:** the request runs under `asyncio.timeout(AI_TIMEOUT_SECONDS)`. When the deadline passes, the request is cancelled and the connection dropped, wherever it is: connecting, sending, waiting for headers, or reading the body.
+- **httpx's per-phase timeouts,** at the same value, underneath.
+
+Tests use real sockets. A server that hangs, one that sends the body a byte at a time, and one that sends the status line and headers a byte at a time each time out at the deadline. Every byte arrives well within the per-phase timeout, so only the total deadline can stop them. Each call uses its own short-lived client, so nothing is held between calls.
+
+Status mapping: 429 → `rate_limited`, 503 and other 5xx → `ai_unavailable`, 504 or the client deadline → `ai_timeout`, a connection failure → `ai_unavailable`. Any other status, a malformed body, or an unexpected exception from the call → `internal` (D5). The provider's error text is discarded, and the original exception is suppressed from tracebacks.
 
 ## D22. The mock-ai interface
 **Touches:** section 7 (test harness); CLAUDE.md (mock).
@@ -159,7 +166,15 @@ Status mapping: 429 → `rate_limited`, 503 and other 5xx → `ai_unavailable`, 
 - **Configuration:** defaults come from `MOCK_*` environment variables.
 - **Probe detection:** a call is counted as a probe when its transcription equals the shared `PROBE_TRANSCRIPT` constant. The real provider would get no flag either.
 
-## D23. A crashed worker loop stops the whole worker process
+## D23. A crashed worker loop drains, then stops the worker process
 **Touches:** section 5 (worker flow), section 6.4.
 
-Under D5, a non-provider error (a database error, a bug) crashes its loop. The process then stops its other loops, exits non-zero, and Compose restarts it (`restart: unless-stopped`). Jobs held at that moment are reclaimed when their leases expire, as the design describes for a crashed worker. The log line records only the exception type.
+Under D5, a non-provider error (a database error, a bug) crashes its loop. The process then:
+
+1. Stops claiming: no loop takes a new job.
+2. Gives loops with a call in flight up to `AI_TIMEOUT_SECONDS` + 5 s to finish it and write the result. That call may already be paid for, so killing it would throw the result away. The call itself is bounded by `AI_TIMEOUT_SECONDS` (D21), and the 5 s margin covers the result-write transaction that follows.
+3. Exits non-zero. Compose restarts it (`restart: unless-stopped`).
+
+Loops still running after the window are abandoned, and their jobs are reclaimed when their leases expire, as the design describes for a crashed worker. The crashed loop's own job is reclaimed the same way.
+
+SIGTERM uses the same drain and exits zero if it completes. The worker's `stop_grace_period` is 40 s so `docker compose stop` doesn't cut the drain short. The log line records only the exception type. `app/worker/main.py:run_loops` implements it, and `tests/test_worker_process.py` covers the crash drain, the bounded drain, SIGTERM, and idle shutdown.
