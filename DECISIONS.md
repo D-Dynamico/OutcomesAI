@@ -178,3 +178,23 @@ Under D5, a non-provider error (a database error, a bug) crashes its loop. The p
 Loops still running after the window are abandoned, and their jobs are reclaimed when their leases expire, as the design describes for a crashed worker. The crashed loop's own job is reclaimed the same way.
 
 SIGTERM uses the same drain and exits zero if it completes. The worker's `stop_grace_period` is 40 s so `docker compose stop` doesn't cut the drain short. The log line records only the exception type. `app/worker/main.py:run_loops` implements it, and `tests/test_worker_process.py` covers the crash drain, the bounded drain, SIGTERM, and idle shutdown.
+
+## D24. The breaker trip check locks the breaker row before counting
+**Touches:** section 5 ("Tripping"), section 7 test 5.
+
+The design's trip check is a plain `SELECT` of recent failures inside the transaction that records a `transient_error`. Under concurrency it undercounts. Each worker's count sees only *committed* failures plus its own, so when several workers record failures at the same moment, several can each count 10 and none trips at 11. The repeated outage test showed it: with 4 workers, real calls reached 15–16, against the design's "near 11 plus the calls already in flight (up to 4)".
+
+**Decision.** Before counting, the trip check takes `SELECT state FROM circuit_breaker WHERE name = 'generate_summary' FOR UPDATE`. That serializes concurrent trip checks: each count statement runs after the previous failure-recording transaction has committed, so it sees every failure. If the state isn't `closed`, it returns straight away, since the trip `UPDATE` could match nothing.
+
+- **No deadlocks:** failure-recording transactions lock the breaker row last, and the probe transactions lock only the breaker row.
+- **D2 still holds:** a row lock isn't a write, so `updated_at` doesn't move.
+- **Cost:** the lock is held only while a failure is being recorded, which is rare outside an outage and brief during one.
+
+The count query itself is unchanged apart from D2's cutoff. After the change, the outage test stayed within 11 + 3 in-flight calls on 25 of 25 repeated runs.
+
+## D25. The worker probes only when the claim found the breaker not closed
+**Touches:** section 5 ("Worker flow").
+
+The design's loop calls `try_probe_if_cooldown_passed()` whenever the claim returns no job. The worker runs it only when the claim's step 0 found the breaker not `closed`. When the breaker is closed, the probe race's `WHERE` (open with the cooldown passed, or half-open with the deadline passed) can never match, so skipping it changes nothing and saves a statement on every idle poll. The claim returns a distinct `BREAKER_NOT_CLOSED` value for this case. A non-provider exception during a probe call crashes the loop like any other (D5, D23). The breaker stays `half_open` until `probe_deadline` passes, and then another worker probes.
+
+The lookback is passed as `make_interval(secs => BREAKER_LOOKBACK_MINUTES * 60)`, since `make_interval`'s `mins` argument only takes integers. The cooldown and probe deadline are parameters too.

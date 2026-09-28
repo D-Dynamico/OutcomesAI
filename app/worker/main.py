@@ -1,7 +1,6 @@
 # Design section 5, "Worker flow". Three short transactions; generate_summary runs outside
-# all of them, holding no connection, lock or open transaction.
-#
-# The circuit breaker (claim gate and probe) arrives in milestone 6.
+# all of them, holding no connection, lock or open transaction. When the circuit breaker is
+# not closed, the worker claims nothing and instead races to send the synthetic probe.
 import logging
 import os
 import random
@@ -16,8 +15,9 @@ from psycopg_pool import ConnectionPool
 from app.config import Config
 from app.db import apply_schema_url, create_pool
 from app.hooks import Hooks
-from app.summary.client import HttpSummaryClient, SummaryClient, TransientError
-from app.worker.claim import claim
+from app.summary.client import PROBE_TRANSCRIPT, HttpSummaryClient, SummaryClient, TransientError
+from app.worker.breaker import BreakerSettings, report_probe, start_probe
+from app.worker.claim import BREAKER_NOT_CLOSED, claim
 from app.worker.precall import precall_supersede
 from app.worker.result import guarded_write, mark_attempt_discarded, record_failure
 
@@ -35,11 +35,14 @@ class Worker:
         self.worker_id = worker_id
         self.hooks = hooks or Hooks(enabled=False)
         self.rng = rng or random.Random()   # backoff jitter
+        self.breaker = BreakerSettings.from_config(config)
 
     def run_once(self) -> str:
         """One pass of the loop. Returns what happened, for tests and logs."""
         job = claim(self.pool, self.worker_id, self.config.lease_seconds,
                     self.config.retry_budget)                                   # txn 1
+        if job is BREAKER_NOT_CLOSED:
+            return self.try_probe()
         if job is None:
             return "idle"
         ids = {"job_id": job.job_id, "encounter_id": job.encounter_id, "version": job.version,
@@ -59,10 +62,12 @@ class Worker:
         try:
             summary = self.client.generate_summary(job.input_transcription)  # no transaction open
         except TransientError as e:
-            status = record_failure(self.pool, job, e.error_class,                  # txn 3a
-                                    budget=self.config.retry_budget,
-                                    backoff_base_seconds=self.config.backoff_base_seconds,
-                                    rng=self.rng)
+            status, tripped = record_failure(self.pool, job, e.error_class,         # txn 3a
+                                             budget=self.config.retry_budget,
+                                             backoff_base_seconds=self.config.backoff_base_seconds,
+                                             rng=self.rng, breaker=self.breaker)
+            if tripped:
+                log.warning("breaker_opened", extra={"worker_id": self.worker_id})
             if status is None:
                 log.warning("transient_error_after_lost_ownership",
                             extra={**ids, "error_class": e.error_class})
@@ -79,9 +84,35 @@ class Worker:
         log.info("result_written", extra={**ids, "status": status})
         return status
 
+    def try_probe(self) -> str:
+        """Section 5, probing. Only reached when the breaker is not closed; with it closed the
+        probe race's WHERE can never match, so skipping it then changes nothing."""
+        my_probe = start_probe(self.pool, self.breaker)          # probes_sent committed first
+        if my_probe is None:
+            return "breaker_open"
+        ids = {"worker_id": self.worker_id, "probe_generation": my_probe}
+        log.info("probe_sent", extra=ids)
+        try:
+            self.client.generate_summary(PROBE_TRANSCRIPT)       # synthetic; no job, no budget
+            succeeded, error_class = True, None
+        except TransientError as e:
+            succeeded, error_class = False, e.error_class
+        if not report_probe(self.pool, my_probe, succeeded, self.breaker):
+            # Our deadline passed and another worker probed; its verdict stands
+            log.warning("probe_result_fenced", extra=ids)
+            return "probe_lost"
+        if succeeded:
+            log.info("breaker_closed", extra=ids)
+            return "probe_succeeded"
+        log.warning("probe_failed", extra={**ids, "error_class": error_class})
+        return "probe_failed"
+
+    # Outcomes after which the loop sleeps before trying again
+    WAIT_OUTCOMES = ("idle", "breaker_open", "probe_failed", "probe_lost")
+
     def run(self, stop: threading.Event) -> None:
         while not stop.is_set():
-            if self.run_once() == "idle":
+            if self.run_once() in self.WAIT_OUTCOMES:
                 stop.wait(self.config.worker_poll_seconds)
 
 

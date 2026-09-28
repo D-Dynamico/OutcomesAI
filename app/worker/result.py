@@ -5,6 +5,7 @@ import random
 from psycopg_pool import ConnectionPool
 
 from app.db import transaction
+from app.worker.breaker import BreakerSettings, trip_if_failing
 from app.worker.claim import ClaimedJob
 
 # Fenced by status = 'processing' and attempts = :my_attempt. The CASE results are cast to
@@ -97,8 +98,10 @@ def backoff_seconds(used: int, base_seconds: float, rng: random.Random) -> float
 
 
 def record_failure(pool: ConnectionPool, job: ClaimedJob, error_class: str, *, budget: int,
-                   backoff_base_seconds: float, rng: random.Random) -> str | None:
-    """Returns 'queued' or 'failed', or None if this worker no longer owns the job.
+                   backoff_base_seconds: float, rng: random.Random,
+                   breaker: BreakerSettings) -> tuple[str | None, bool]:
+    """Returns (job status, tripped). Status is 'queued' or 'failed', or None if this worker no
+    longer owns the job; tripped is True if this failure opened the circuit breaker.
 
     On None the reclaiming worker has already closed this attempt as lease_expired, and it is
     left that way (DECISIONS.md D1).
@@ -111,7 +114,8 @@ def record_failure(pool: ConnectionPool, job: ClaimedJob, error_class: str, *, b
         params.update(used=used, backoff_seconds=backoff_seconds(used, backoff_base_seconds, rng))
         row = conn.execute(REQUEUE_OR_FAIL, params).fetchone()
         if row is None:
-            return None
+            return None, False
         conn.execute(CLOSE_TRANSIENT, params)
-        # Breaker trip check (milestone 6) runs here, in the same transaction
-    return row[0]
+        # Breaker trip check, same transaction: this attempt's transient_error is visible to it
+        tripped = trip_if_failing(conn, breaker)
+    return row[0], tripped

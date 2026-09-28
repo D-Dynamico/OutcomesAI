@@ -1,7 +1,8 @@
 # Design section 5: claiming a job (txn 1).
 #
-# One transaction: take the oldest claimable job with SKIP LOCKED, move the fencing token,
-# stamp the lease, close out any abandoned previous attempt, and open this attempt. The
+# One transaction: check the circuit breaker, take the oldest claimable job with SKIP LOCKED,
+# move the fencing token, stamp the lease, close out any abandoned previous attempt, check the
+# retry budget if this is a reclaim, and open this attempt. The
 # attempt row is committed here, before any paid call (section 5, "Why the call cannot sit
 # inside a transaction").
 from dataclasses import dataclass
@@ -9,6 +10,11 @@ from dataclasses import dataclass
 from psycopg_pool import ConnectionPool
 
 from app.db import transaction
+from app.worker.breaker import breaker_state
+
+# Returned instead of a job when the breaker is not closed: nothing was claimed, so no fencing
+# token moved, no lease, no attempt row, no budget consumed (section 5, "While open")
+BREAKER_NOT_CLOSED = object()
 
 # Step 1: queued and due, or processing with an expired lease
 TAKE_JOB = """
@@ -75,8 +81,13 @@ class ClaimedJob:
     failed_on_reclaim: bool = False   # step 3 found the budget spent; the job is now failed
 
 
-def claim(pool: ConnectionPool, worker_id: str, lease_seconds: float, budget: int) -> ClaimedJob | None:
+def claim(pool: ConnectionPool, worker_id: str, lease_seconds: float, budget: int):
+    """Returns a ClaimedJob, None if nothing is due, or BREAKER_NOT_CLOSED."""
     with transaction(pool) as conn:
+        # Step 0: circuit breaker; if not closed, do not claim
+        if breaker_state(conn) != "closed":
+            return BREAKER_NOT_CLOSED
+
         row = conn.execute(TAKE_JOB, {"lease_seconds": lease_seconds}).fetchone()
         if row is None:
             return None
