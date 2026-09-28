@@ -40,8 +40,9 @@ class Config:
 
     mock_ai_url: str = "http://mock-ai:8001"
 
-    # Test-only hooks stay inert unless this is set
+    # Test-only hooks stay inert unless this is set (app/hooks.py)
     test_hooks: bool = False
+    crash_at: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":

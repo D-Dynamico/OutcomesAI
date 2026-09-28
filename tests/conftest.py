@@ -4,8 +4,11 @@ import os
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 from psycopg import sql
 
+from app.api.main import create_app
+from app.config import Config
 from app.db import apply_schema
 
 TEST_DATABASE_URL = os.environ.get(
@@ -48,3 +51,25 @@ def fresh_db(db_url) -> str:
     with psycopg.connect(db_url) as conn:
         apply_schema(conn)
     return db_url
+
+
+@pytest.fixture
+def db(fresh_db):
+    """Autocommit connection for arranging and asserting on stored state."""
+    with psycopg.connect(fresh_db, autocommit=True) as conn:
+        yield conn
+
+
+TEST_MAX_BODY_BYTES = 8192
+
+
+@pytest.fixture
+def app_config(fresh_db) -> Config:
+    return Config(database_url=fresh_db, db_pool_size=4, test_hooks=True,
+                  max_body_bytes=TEST_MAX_BODY_BYTES)
+
+
+@pytest.fixture
+def api(app_config):
+    with TestClient(create_app(app_config)) as client:
+        yield client

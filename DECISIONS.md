@@ -67,6 +67,8 @@ In addition to the design's rules:
 - `version` must fit in a Postgres `INTEGER`.
 - `payload.transcription` must be a string (not null; empty is allowed).
 - The payload hash is SHA-256 of the transcription's UTF-8 bytes.
+- Strings containing NUL, or lone surrogates that cannot be encoded as UTF-8, return `400`. Postgres `TEXT` cannot store them, so they would otherwise be a `500`.
+- Unknown extra fields in the body or in `payload` are ignored.
 
 Anything else returns `400`.
 
@@ -94,3 +96,27 @@ The design reads and updates the `'generate_summary'` row but never inserts it. 
 **Touches:** CLAUDE.md (source of truth).
 
 `encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. The original brief is `docs/BE_ClinicalAI_T_Encounters.pdf`. `docs/design.md` is git-ignored, so a fresh clone has only the brief and the submitted report.
+
+## D14. Error bodies for 400, 413 and 500
+**Touches:** section 3 ("Before the transaction"), section 4 (POST).
+
+The design gives status codes for these but no bodies. They use the same shape as the design's `404` (`{"error": "<fixed code>", ...}`):
+
+- `400`: `{"error": "invalid_request", "detail": "<rule broken>"}`. `detail` names the field and rule, never the submitted value.
+- `413`: `{"error": "payload_too_large", "max_bytes": N}`. The declared `Content-Length` is checked first, then the streamed byte count, so a chunked body is also cut off at the limit before parsing.
+- `500`: `{"error": "internal"}`. The log line carries only the exception type and path, since exception messages can contain request data. A 5xx tells the partner to retry, which is safe because ingestion is one transaction.
+
+## D15. `conflicting_field` when both identity fields differ
+**Touches:** section 4 (identity mismatch body), section 6.8.
+
+The body has room for one field. If both `patient_id` and `encounter_type` contradict the stored values, it reports `patient_id`. The log line records both pairs.
+
+## D16. `Location` header percent-encodes the encounter ID
+**Touches:** section 4 (accepted).
+
+`Location: /encounters/{encounter_id}/summary`, with the ID percent-encoded (`quote(id, safe="")`) so IDs containing `/`, spaces or `?` still produce a valid path.
+
+## D17. Test hooks and crash injection
+**Touches:** section 7 (test harness).
+
+`app/hooks.py` defines named points in ingestion: `ingest.after_lock`, `ingest.before_commit` and `ingest.after_commit`. Tests register in-process callbacks on them, which is how the lock-hold hook and in-process failure injection work. Setting `CRASH_AT=<point>` kills the process there with `os._exit`. Both are inert unless `TEST_HOOKS` is set: `fire()` returns before looking at callbacks or `CRASH_AT`.
