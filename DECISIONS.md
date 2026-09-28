@@ -253,3 +253,21 @@ Labels are fixed enum values only, with no IDs.
 - **Exceptions:** only the exception type (`error_type`) is written. The message and traceback never are, because exception text can carry request data. This covers uvicorn's own "Exception in ASGI application".
 - **httpx:** its per-request INFO lines are silenced.
 - **Tests:** `tests/test_observability.py` drives every ingestion outcome, a 500 whose exception message *is* the transcript, a transient error and a success, with a distinctive transcript and summary. It checks that neither appears in any log line, and that patient IDs appear only in the `identity_conflict` line.
+
+## D28. How the seven headline tests are built
+**Touches:** section 7 ("Test harness", "The five tests", "Not covered by these five").
+
+All seven live in `tests/test_headline.py`, with the harness pieces in `tests/harness.py`.
+
+- **Forced interleaving.** `LockHold` is registered on `ingest.after_lock`. The first transaction to take the encounter row lock holds it until `pg_stat_activity` shows another backend waiting on a lock. Every iteration asserts that this happened (`lock_hold.forced`), so an iteration that failed to interleave can't pass silently. Two app instances with separate pools stand in for two service instances.
+- **Iterations.** Tests 1 and 3 run 200 iterations; test 1 runs once on existing encounters and once on brand-new ones. Test 2 runs 100 iterations, because each one also drains the worker and samples GET throughout. Every iteration uses a fresh encounter ID.
+- **Test 2:** it alternates which version takes the lock first, so each response is deterministic: v12 first gives `201` then `201` and a superseded v12 job; v13 first gives `201` and `200 stale`, with no v12 job. Following the design ("workers then process whatever jobs exist"), the worker runs after the ingestion race, so the v12 job is always superseded at the pre-call check. The guarded-write path to `superseded` is covered by test 6.
+- **Test 4** uses real uvicorn processes (`ApiProcess`) with `CRASH_AT=ingest.before_commit` or `ingest.after_commit`. The test checks the process exited with the hook's code (17), that the partner got no response, the stored state after each crash, and the retry against a healthy instance.
+- **Test 5** compresses the 20-minute outage to about 3 s: 0.2 s cooldown, 0.2 s backoff base, and an SLA of 0.5 s so `sla_breached` is meaningful. It asserts the design's bound of 11 plus the calls already in flight (up to 4 with 4 workers), measured after in-flight calls have landed (D24). It also checks:
+  - while the breaker is open: no real calls, no new attempt rows, no fencing counter moved;
+  - probes: synthetic only, about one per cooldown, and `probes_sent` matching the mock's probe count (the gap is at most 1 while a probe is in flight, and 0 at the end);
+  - no job failed, and GET reports `processing` with `sla_breached: true` during the outage;
+  - after recovery, all 100 jobs are `ready` with exactly one successful call each.
+- **Test 7** waits for the real lease to expire (1 s lease, 0.5 s AI timeout) instead of moving it in the database. It checks `lease_expired`/`worker_lost` right after the reclaim, then `discarded` once A returns (D1).
+
+`tests/test_ingest_concurrency.py`, the barrier-only early versions of tests 1–3 from milestone 2, was removed once the forced versions existed.
