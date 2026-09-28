@@ -119,7 +119,7 @@ The body has room for one field. If both `patient_id` and `encounter_type` contr
 ## D17. Test hooks and crash injection
 **Touches:** section 7 (test harness).
 
-`app/hooks.py` defines named points in ingestion: `ingest.after_lock`, `ingest.before_commit` and `ingest.after_commit`. Tests register in-process callbacks on them, which is how the lock-hold hook and in-process failure injection work. Setting `CRASH_AT=<point>` kills the process there with `os._exit`. Both are inert unless `TEST_HOOKS` is set: `fire()` returns before looking at callbacks or `CRASH_AT`.
+`app/hooks.py` defines named points in ingestion (`ingest.after_lock`, `ingest.before_commit`, `ingest.after_commit`) and in the worker (`worker.after_claim`, `worker.before_call`, `worker.after_call`). Tests register in-process callbacks on them, which is how the lock-hold hook and in-process failure injection work. Setting `CRASH_AT=<point>` kills the process there with `os._exit`. Both are inert unless `TEST_HOOKS` is set: `fire()` returns before looking at callbacks or `CRASH_AT`.
 
 ## D18. An encounter whose current version has no job returns 404
 **Touches:** section 4 (unknown encounter).
@@ -130,3 +130,35 @@ Section 4 says this case is impossible, given single-transaction ingestion, but 
 **Touches:** section 4 (GET examples).
 
 `accepted_at` and `completed_at` are RFC 3339 in UTC with a `Z` suffix, truncated to whole seconds (`2026-09-18T10:04:11Z`), matching the design's examples. `sla_breached` is computed in SQL from full-precision timestamps and Postgres `now()`, so truncation never affects it.
+
+## D20. Small SQL changes to the worker statements
+**Touches:** section 5 (claiming, guarded write).
+
+- **Guarded write:** the `CASE ... THEN 'ready' ELSE 'superseded' END` is cast to `::job_status`. Postgres types a `CASE` of string literals as `text`, which can't be assigned to an enum column. `RETURNING j.status::text` returns a plain string.
+- **Claim:** the lease is `now() + make_interval(secs => :lease_seconds)` instead of the literal `interval '60 seconds'`, so `LEASE_SECONDS` configures it. The default is still 60.
+
+Everything else matches the design's text.
+
+## D21. How the 30-second client timeout is enforced
+**Touches:** section 0 (assumptions), section 5 (lease > AI timeout).
+
+`HttpSummaryClient` uses an httpx timeout of `AI_TIMEOUT_SECONDS` for connecting, each read and each write. The provider sends its response in one piece, so this bounds the whole call. A test checks it against a hanging server. A provider that sent its response a trickle at a time could outlast it. Against a real provider, a total-deadline wrapper would be the fix.
+
+Status mapping: 429 → `rate_limited`, 503 and other 5xx → `ai_unavailable`, 504 or a client timeout → `ai_timeout`, a connection failure → `ai_unavailable`. Any other status, a malformed body, or an unexpected exception from the call → `internal` (D5). The provider's error text is discarded, and the original exception is suppressed from tracebacks.
+
+## D22. The mock-ai interface
+**Touches:** section 7 (test harness); CLAUDE.md (mock).
+
+- **`POST /generate_summary`** takes `{"transcription": ...}` and returns `{"summary": ...}`.
+  - Latency is 2–8 s, with a share of slow calls at 12 s.
+  - Failures are split evenly across 429, 503 and a hang past the worker's 30 s timeout.
+  - Outage mode returns 503 for every call.
+  - The wording varies per call and uses only the transcript's word count, never its content.
+- **Admin endpoints:** `GET/POST /admin/settings` for partial updates, e.g. `{"outage": true}`, plus `GET /admin/stats` and `POST /admin/reset`.
+- **Configuration:** defaults come from `MOCK_*` environment variables.
+- **Probe detection:** a call is counted as a probe when its transcription equals the shared `PROBE_TRANSCRIPT` constant. The real provider would get no flag either.
+
+## D23. A crashed worker loop stops the whole worker process
+**Touches:** section 5 (worker flow), section 6.4.
+
+Under D5, a non-provider error (a database error, a bug) crashes its loop. The process then stops its other loops, exits non-zero, and Compose restarts it (`restart: unless-stopped`). Jobs held at that moment are reclaimed when their leases expire, as the design describes for a crashed worker. The log line records only the exception type.

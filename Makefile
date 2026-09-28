@@ -8,7 +8,9 @@ down:
 	docker compose down
 
 # Runs pytest inside the app image against a dedicated test database on the Compose db
+# mock-ai is started first for the end-to-end smoke test
 test:
+	docker compose up -d --build --wait db mock-ai
 	docker compose run --rm --build api python -m pytest $(ARGS)
 
 logs:

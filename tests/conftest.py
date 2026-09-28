@@ -9,7 +9,10 @@ from psycopg import sql
 
 from app.api.main import create_app
 from app.config import Config
-from app.db import apply_schema
+from app.db import apply_schema, create_pool
+from app.hooks import Hooks
+from app.summary.mock import ScriptedSummaryClient
+from app.worker.main import Worker
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://outcomes:outcomes@db:5432/outcomes_test"
@@ -73,3 +76,31 @@ def app_config(fresh_db) -> Config:
 def api(app_config):
     with TestClient(create_app(app_config)) as client:
         yield client
+
+
+@pytest.fixture
+def worker_config(fresh_db) -> Config:
+    # Shrunk durations; the lease > AI timeout rule still holds
+    return Config(database_url=fresh_db, db_pool_size=10, test_hooks=True,
+                  lease_seconds=2, ai_timeout_seconds=1, probe_deadline_seconds=2,
+                  worker_poll_seconds=0.05)
+
+
+@pytest.fixture
+def pool(fresh_db):
+    p = create_pool(fresh_db, 10)
+    yield p
+    p.close()
+
+
+@pytest.fixture
+def mock():
+    return ScriptedSummaryClient()
+
+
+@pytest.fixture
+def make_worker(pool, mock, worker_config):
+    def make(worker_id="w-A", client=None, hooks=None):
+        return Worker(pool, client or mock, worker_config, worker_id,
+                      hooks or Hooks(enabled=True))
+    return make

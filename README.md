@@ -28,6 +28,7 @@ The schema is applied automatically at startup. No manual steps are needed.
 ```sh
 make test
 # without make:
+docker compose up -d --build --wait db mock-ai
 docker compose run --rm --build api python -m pytest
 ```
 

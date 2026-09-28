@@ -52,6 +52,8 @@ services:
     command: ["python", "-m", "app.worker.main"]
     environment:
       <<: *app-env
+    # A loop that hits a non-provider error exits the process (DECISIONS.md D5); restart it.
+    restart: unless-stopped
     # No published ports, so `--scale worker=N` never collides on the host.
     depends_on:
       db:
