@@ -90,7 +90,7 @@ Gauges derived from the database (queue depth, SLA breaching counts, `oldest_unf
 
 The design reads and updates the `'generate_summary'` row but never inserts it. Startup runs `INSERT ... ON CONFLICT DO NOTHING` after applying the schema.
 
-## D13. The design file lives at `docs/design.md`; the brief is not in the repo
+## D13. Document locations
 **Touches:** CLAUDE.md (source of truth).
 
-`encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. The original brief (`docs/brief.pdf`) was not provided.
+`encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. The original brief is `docs/BE_ClinicalAI_T_Encounters.pdf`. `docs/design.md` is git-ignored, so a fresh clone has only the brief and the submitted report.
