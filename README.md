@@ -1,12 +1,55 @@
 # Reliable Encounter Updates & AI Summaries
 
-A deployable implementation of the design in [`docs/design.md`](docs/design.md), written for the Backend Engineer / Clinical AI exercise ([`docs/BE_ClinicalAI_T_Encounters.pdf`](docs/BE_ClinicalAI_T_Encounters.pdf)). The submitted write-up is [`docs/submission.pdf`](docs/submission.pdf), a condensed version of the design.
+A backend service that receives clinical encounter updates from a partner system, stores the latest version of each encounter, and generates an AI summary of it in the background.
 
-The service ingests versioned clinical encounter updates from a partner that sends duplicates, out-of-order and concurrent updates, and crashes. It stores the latest state and generates an AI summary in the background through a paid, non-idempotent, sometimes-failing `generate_summary` call.
+This is the working implementation of the design I submitted for the Backend Engineer / Clinical AI exercise. The full design is in [`docs/design.md`](docs/design.md), and every place the code interprets or departs from it is recorded in [`DECISIONS.md`](DECISIONS.md).
 
-The guarantees live in Postgres (unique constraints, row locks, compare-and-swap updates, `FOR UPDATE SKIP LOCKED`), so the implementation uses psycopg 3 and raw SQL, and each statement follows the design's text closely enough to be checked against it. Every place the code interprets or departs from the design is recorded in [`DECISIONS.md`](DECISIONS.md) (D1–D28).
+## The problem
 
-**Contents:** [Quick start](#quick-start) · [API](#api) · [Demo: AI outage](#demo-a-20-minute-ai-outage) · [Demo: failure and redrive](#demo-retry-exhaustion-and-redrive) · [Observability](#observability) · [Configuration](#configuration) · [Tests](#tests) · [Design to code](#design-to-code) · [Limitations](#known-limitations)
+Both sides of the service are unreliable. The partner sends the same update twice, sends versions out of order, and sends them concurrently. The AI call is slow, sometimes fails, words its answer differently each time, and costs money on every attempt, including retries.
+
+## What the service guarantees
+
+- **Every accepted update is stored exactly once**, and the stored version never goes backwards.
+- **No accepted update is lost**, even if a process crashes mid-request.
+- **An older summary is never shown as current**, whatever order the AI calls finish in.
+- **Conflicting data is rejected, never applied**: an update that changes an encounter's patient or rewrites an existing version gets a `409`.
+- **An AI outage costs a bounded number of paid calls**, however many jobs are waiting.
+- **No patient content reaches logs or metrics**: no transcripts, summaries, or raw provider errors.
+
+The first three rest on Postgres itself: unique constraints decide duplicates, a compare-and-swap update stops regressions, and each accepted update and its summary job commit in one transaction. The outage bound comes from retry budgets and a circuit breaker shared across workers. Each guarantee has a test that forces the race, crash, or outage it protects against.
+
+## Try it
+
+```bash
+docker compose up --build   # api on :8000, plus worker, mock AI provider and Postgres
+make test                   # full suite against a real Postgres
+```
+
+Examples for every API outcome, the outage demo and redrive are below.
+
+**Stack:** Python 3.12 · FastAPI · Postgres 16 via psycopg 3 and raw SQL (no ORM) · Docker Compose (api, worker, mock-ai, db).
+
+**Contents:** [5-minute tour](#5-minute-tour) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Guarantees](#guarantees-and-where-they-are-proven) · [API](#api) · [Demo: AI outage](#demo-a-20-minute-ai-outage) · [Demo: failure and redrive](#demo-retry-exhaustion-and-redrive) · [Observability](#observability) · [Configuration](#configuration) · [Tests](#tests) · [Design to code](#design-to-code) · [Limitations](#known-limitations)
+
+---
+
+## 5-minute tour
+
+1. **Run it:** `docker compose up --build`, then post an event and read it back. The first two commands in [API](#api) do this, and the summary is `ready` a few seconds later.
+2. **Break the AI:** follow [Demo: AI outage](#demo-a-20-minute-ai-outage). The breaker trips after about 11 paid calls, probes once per cooldown, and every job recovers when the outage ends.
+3. **Run the proofs:** `make test` runs 180 tests against real Postgres, including the [seven headline tests](#tests) that force the races and crashes the design is about.
+4. **Read the core, in this order:**
+
+   | File | What it holds | Design section |
+   |---|---|---|
+   | [`app/api/ingest.py`](app/api/ingest.py) | The single ingestion transaction | §3 |
+   | [`app/worker/claim.py`](app/worker/claim.py) | Claiming: `SKIP LOCKED`, lease, fencing counter, reclaim | §5 |
+   | [`app/worker/result.py`](app/worker/result.py) | Fenced result writes, retry budget, backoff | §5 |
+   | [`app/worker/breaker.py`](app/worker/breaker.py) | Shared circuit breaker and its probe race | §5 |
+   | [`tests/test_headline.py`](tests/test_headline.py) | The seven tests that prove the above | §7 |
+
+5. **Check the judgement calls:** [`DECISIONS.md`](DECISIONS.md). D24 is the one that fixes a real concurrency bug in the design's SQL.
 
 ---
 
@@ -31,6 +74,78 @@ The schema is applied automatically at startup. The api and every worker replica
 | `mock-ai` | The mock `generate_summary` provider: latency, failures, an outage switch, and real/probe call counts. Never logs request bodies (D3, D22). | 8001 |
 
 `make up`, `make down`, `make logs` and `make test` wrap the plain `docker compose` commands shown in each section. Without `make` (for example on Windows), run those commands directly.
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    partner([Partner]) -->|"POST /encounters/events"| api
+    client([Clinical UI]) -->|"GET /encounters/{id}/summary"| api
+    operator([Operator]) -->|"POST /admin/jobs/…/redrive"| api
+
+    subgraph pg [Postgres]
+        direction TB
+        enc[(encounters)]
+        ev[(encounter_events)]
+        jobs[(summary_jobs)]
+        att[(job_attempts)]
+        cb[(circuit_breaker)]
+    end
+
+    api[api] -->|"one transaction: upsert + lock encounter,<br/>insert event, compare-and-swap version,<br/>insert job"| pg
+    worker["worker × N<br/>(4 loops each)"] -->|"claim (SKIP LOCKED + lease),<br/>fenced writes"| pg
+    worker -->|"generate_summary,<br/>no transaction open"| ai[mock-ai]
+    worker -.->|"synthetic probe<br/>while breaker is open"| ai
+```
+
+1. **Ingestion is one transaction.** The encounter row is upserted and locked, the event is inserted so the constraints can decide duplicates, the version moves only by compare-and-swap, and the job row is inserted. The commit *is* the hand-off to the workers, so nothing can be saved without its work.
+2. **Workers claim from the table.** They use `FOR UPDATE SKIP LOCKED` and stamp a 60 s lease. The job's `attempts` column is bumped as a fencing counter, and an attempt row is committed **before** any paid call.
+3. **The call runs outside any transaction.** Every later write is fenced on `attempts = my_attempt`, so a worker that stalled past its lease can't overwrite anything.
+4. **Reads resolve through `encounters.current_version`.** An older summary can't be reached once a newer version is accepted.
+5. **One shared breaker row watches the provider.** It trips on 11 of the last 20 service-reaching attempts. While it's open, workers claim nothing, and a single worker sends a synthetic probe once per cooldown.
+
+**A job's lifecycle:**
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> queued : event accepted<br/>(ingestion commit)
+    queued --> processing : claimed<br/>(due, breaker closed)
+    processing --> processing : reclaimed after<br/>lease expiry
+    processing --> ready : result written,<br/>version still current
+    processing --> superseded : newer version<br/>(pre-call check or result write)
+    processing --> queued : transient error,<br/>budget left (backoff)
+    processing --> failed : budget of 5 spent
+    failed --> queued : redrive,<br/>still current
+    failed --> superseded : redrive,<br/>encounter moved on
+    ready --> [*]
+    superseded --> [*]
+```
+
+`failed` is terminal for automation. Only an operator's redrive moves it, which puts a human decision between an exhausted budget and further spend.
+
+---
+
+## Guarantees and where they are proven
+
+Each row is one of CLAUDE.md's non-negotiables: the mechanism that enforces it, and the test that would fail without it.
+
+| Guarantee | Enforced by | Proven by |
+|---|---|---|
+| Ingestion commits all of it or none of it | One transaction in `ingest()`: every outcome except accepted rolls back | headline test 4 (process killed before and after COMMIT) · `test_failure_before_commit_rolls_back_everything` |
+| Duplicates are decided by constraints, never by a read first | `INSERT … ON CONFLICT DO NOTHING` on the `event_id` primary key and `(encounter_id, version)` | headline test 1 (200 forced races × 2) |
+| The version never regresses | `UPDATE … WHERE current_version < :version` (compare-and-swap) | headline test 2 |
+| First patient wins; the 409 echoes no patient ID | Identity read back under `FOR UPDATE` | headline test 3 |
+| `generate_summary` never runs inside a transaction | Three short transactions around the call | `test_no_transaction_or_lock_held_during_the_call` (checks for open transactions and row locks mid-call) |
+| Spend is recorded before it happens | The attempt row is committed at claim, and `probes_sent` is committed before the probe call | same test · headline test 5 (`probes_sent` = probe calls) |
+| Every worker write is fenced | `attempts = :my_attempt` (and `status = 'processing'`) on every worker write, `probe_generation` on probe reports | headline test 7 · `test_stalled_prober_cannot_overwrite_a_newer_verdict` · `test_worker_from_before_the_failure_cannot_write_after_redrive` |
+| An older summary never appears as current | GET joins through `current_version`, and the result write labels obsolete results `superseded` | headline tests 2 and 6 (GET sampled throughout) |
+| An outage costs a bounded number of calls, whatever the queue depth | Shared breaker; trip check serialized by a row lock (D24) | headline test 5 · `test_breaker.py` |
+| All time comparisons use Postgres `now()` | Leases, backoff, cooldowns and SLA are all computed in SQL | `test_processing_sla_breach_uses_database_clock` · headline test 7 (real lease expiry) |
+| No patient content in logs, metrics or error bodies | Fixed-enum errors; the JSON log formatter reduces exceptions to their type | `test_logs_never_carry_patient_content` (a 500 whose exception message *is* the transcript) · `test_metrics_carry_no_patient_content` |
+| Response bodies match design §4 exactly | Built in one place per outcome | exact-body tests in `test_ingest.py` and `test_read.py` |
 
 ---
 
@@ -288,22 +403,52 @@ docker compose run --rm --build api python -m pytest
 
 The concurrency tests force the interleaving, not just hope for it. A barrier releases the requests, and a test-only hook holds the first transaction after it takes the row lock until Postgres shows the second one waiting. Each iteration asserts that happened. Crash tests kill a real uvicorn process at the named point with `os._exit`. All test hooks do nothing unless `TEST_HOOKS` is set.
 
-The rest of the suite covers:
-- every ingestion outcome with exact bodies, plus validation and the size limit;
-- the read path;
-- the worker happy path and fencing;
-- backoff and budget, including poison jobs;
-- the circuit breaker, including a probe race among 8 workers;
-- redrive;
-- the provider client's total deadline against real hanging and trickling servers;
-- the graceful drain;
-- metrics values;
-- a log-privacy test in which a 500 carries the transcript in its exception message;
-- an end-to-end smoke test of a real worker process against the mock-ai container.
+The rest of the suite, by file:
+
+| File | Covers |
+|---|---|
+| `test_ingest.py` | Every POST outcome with its exact body and stored state, 20 malformed inputs, the size limit (exact limit, one byte over, chunked), rollback, the test hooks being inert |
+| `test_read.py` | Processing, ready, failed and 404 bodies; `sla_breached` either side of 10 s; `attempts`/`error_class` across redrive generations; older summaries never resurfacing |
+| `test_worker.py` | Happy path, oldest-first, what is never claimable, 6 workers draining 30 jobs, pre-call skip, in-flight supersede, stalled worker discarded |
+| `test_failures.py` | Transient errors, backoff doubling (10/20/40/80 s), the fifth failure, a poison job failing on reclaim, a worker bug crashing its loop |
+| `test_breaker.py` | Tripping on exactly the 11th failure, the lookback, which outcomes count, the claim gate, the probe race (8 workers → 1 probe), the D2 recovery case, a small outage end to end |
+| `test_redrive.py` | Single and bulk redrive, superseding obsolete jobs, a fresh budget, concurrent redrives, fencing across a redrive |
+| `test_summary_client.py` | Error-class mapping; the total deadline against real hanging, body-trickling and header-trickling servers |
+| `test_worker_process.py` | Draining in-flight calls after a crash or SIGTERM, and the bounded drain |
+| `test_observability.py` | Every metric's value, gauges read on scrape, and no patient content in metrics or logs |
+| `test_smoke_e2e.py` | A real worker process against the real mock-ai container, including its metrics port |
+| `test_schema.py`, `test_config.py`, `test_health.py`, `test_mockai.py` | Schema applied once under concurrency, config validation, health checks, mock-ai behaviour |
 
 ---
 
 ## Design to code
+
+```
+app/
+  config.py            all tunables, design defaults, startup validation
+  db.py                pool, transaction helper, schema applied once
+  schema.sql           the design's DDL, verbatim
+  hooks.py             test-only named hook points and CRASH_AT (inert by default)
+  logs.py              JSON logs; exceptions reduced to their type
+  metrics.py           Prometheus metrics; database gauges computed on scrape
+  api/
+    main.py            routes, size limit, /metrics, /healthz
+    ingest.py          POST: validation and the single transaction
+    read.py            GET: resolved through current_version
+    admin.py           redrive, single job and time window
+  worker/
+    main.py            the worker loop, probing, drain on crash or SIGTERM
+    claim.py           txn 1: breaker gate, SKIP LOCKED, lease, reclaim, budget
+    precall.py         txn 2: supersede obsolete work before paying
+    result.py          txn 3: guarded write, discarded, transient path, backoff
+    breaker.py         trip check, probe race, probe report
+  summary/
+    client.py          HTTP provider client, total deadline, fixed error classes
+    mock.py            scriptable in-process mock for tests
+  mockai/main.py       the mock-ai service
+tests/                 harness.py, factories.py, conftest.py, test_*.py
+docs/                  design.md (the spec), the brief, the submitted PDF
+```
 
 | Design section | Code |
 |---|---|
