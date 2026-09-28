@@ -1,0 +1,63 @@
+name: outcomes
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://outcomes:outcomes@db:5432/outcomes
+  MOCK_AI_URL: http://mock-ai:8001
+
+x-healthcheck-http: &healthcheck-http
+  interval: 3s
+  timeout: 3s
+  retries: 20
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: outcomes
+      POSTGRES_PASSWORD: outcomes
+      POSTGRES_DB: outcomes
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outcomes -d outcomes"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mock-ai:
+    build: .
+    command: ["uvicorn", "app.mockai.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"   # published so the outage switch can be flipped from the host (demo)
+    healthcheck:
+      <<: *healthcheck-http
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz')"]
+
+  api:
+    build: .
+    command: ["uvicorn", "app.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-http
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker.main"]
+    environment:
+      <<: *app-env
+    # No published ports, so `--scale worker=N` never collides on the host.
+    depends_on:
+      db:
+        condition: service_healthy
+      mock-ai:
+        condition: service_healthy
+
+volumes:
+  pgdata:
