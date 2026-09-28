@@ -37,7 +37,7 @@ The first three rest on Postgres itself: unique constraints decide duplicates, a
 
 ## Quick start
 
-Requires Docker with Compose v2; nothing else on the host. **Stack:** Python 3.12 · FastAPI · Postgres 16 via psycopg 3 and raw SQL (no ORM) · Docker Compose.
+Requires Docker with Compose v2; nothing else on the host. **All commands in this README and `docs/` are bash:** on Windows, run them in Git Bash or WSL, not PowerShell. **Stack:** Python 3.12 · FastAPI · Postgres 16 via psycopg 3 and raw SQL (no ORM) · Docker Compose.
 
 ```sh
 git clone https://github.com/D-Dynamico/OutcomesAi.git && cd OutcomesAi
@@ -142,17 +142,20 @@ curl -X POST localhost:8000/admin/jobs/1/redrive
 
 ## Demo: a 20-minute AI outage
 
-Design §6.7 with production defaults (30 s breaker cooldown), 3 worker containers and 40 jobs:
+Design §6.7 with production defaults (30 s breaker cooldown), 3 worker containers and 40 jobs. **Paste it in three parts, pausing where the comments say.** Pasted in one go, the outage ends before any probe is sent. To run it again, start with `docker compose down -v`.
 
 ```sh
+# Part 1: start, switch the AI into an outage, post 40 encounters
 docker compose up -d --build --scale worker=3
 curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -d '{"outage": true}'
 for i in $(seq 1 40); do
   curl -s -o /dev/null -X POST localhost:8000/encounters/events -H 'content-type: application/json' \
     -d "{\"event_id\":\"evt-o$i\",\"encounter_id\":\"enc-o$i\",\"patient_id\":\"pat-$i\",\"encounter_type\":\"TelephoneTriage\",\"version\":1,\"payload\":{\"transcription\":\"Nurse: call $i\"}}"
 done
-curl -s localhost:8000/metrics | grep -E '^(breaker_state|breaker_probes_sent_total|summary_jobs\{)'   # watch
-curl -s localhost:8001/admin/stats                                                                    # real vs probe calls
+# Part 2: repeat these two every ~30 s for ~90 s: the breaker stays open, probes climb, real calls stay flat
+curl -s localhost:8000/metrics | grep -E '^(breaker_state|breaker_probes_sent_total|summary_jobs\{)'
+curl -s localhost:8001/admin/stats
+# Part 3: end the outage, wait ~45 s, then run part 2 once more: breaker closed, 40 ready, 0 failed
 curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -d '{"outage": false}'
 ```
 
