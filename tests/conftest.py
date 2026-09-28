@@ -1,5 +1,5 @@
 # Tests run against a real Postgres (the Compose `db` service), in a dedicated database so
-# they never touch the running stack's data. Never SQLite, never a fake (CLAUDE.md).
+# they never touch the running stack's data. Never SQLite, never a fake (design section 7).
 import os
 
 import psycopg

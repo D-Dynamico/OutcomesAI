@@ -27,7 +27,7 @@ The trip query counts the last 20 service-reaching attempts within 10 minutes. A
 **Decision.** The trip query adds `finished_at > greatest(now() - lookback, breaker.updated_at)`. While the breaker is `closed`, `updated_at` is the moment it closed. This relies on nothing else writing the breaker row while it is closed (a comment in the code says so). A unit test checks that one `transient_error` after a probe closes the breaker does not re-trip it.
 
 ## D3. The mock provider is a fourth Compose service, `mock-ai`
-**Touches:** section 7 (test harness); CLAUDE.md (stack, mock).
+**Touches:** section 7 (test harness); the Compose topology (a fourth service).
 
 An in-process mock can't be switched into outage mode from an admin endpoint once workers are scaled to several containers, and it can't give one call count across them. `mock-ai` is an HTTP service that owns the outage switch, latency and failure settings, and the real/probe call counters. It never logs request bodies. Workers call it over HTTP, so the 30-second client timeout is a real network timeout. Tests drive in-process workers with a scriptable mock for determinism, plus one end-to-end smoke test of a real worker against the `mock-ai` container.
 
@@ -93,7 +93,7 @@ Gauges derived from the database (queue depth, SLA breaching counts, `oldest_unf
 The design reads and updates the `'generate_summary'` row but never inserts it. Startup runs `INSERT ... ON CONFLICT DO NOTHING` after applying the schema.
 
 ## D13. Document locations
-**Touches:** CLAUDE.md (source of truth).
+**Touches:** repository layout.
 
 `encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. The original brief is `docs/BE_ClinicalAI_T_Encounters.pdf`. All three are committed, so a reviewer can check every section reference against the spec.
 
@@ -155,7 +155,7 @@ Tests use real sockets. A server that hangs, one that sends the body a byte at a
 Status mapping: 429 → `rate_limited`, 503 and other 5xx → `ai_unavailable`, 504 or the client deadline → `ai_timeout`, a connection failure → `ai_unavailable`. Any other status, a malformed body, or an unexpected exception from the call → `internal` (D5). The provider's error text is discarded, and the original exception is suppressed from tracebacks.
 
 ## D22. The mock-ai interface
-**Touches:** section 7 (test harness); CLAUDE.md (mock).
+**Touches:** section 7 (test harness).
 
 - **`POST /generate_summary`** takes `{"transcription": ...}` and returns `{"summary": ...}`.
   - Latency is 2–8 s, with a share of slow calls at 12 s.

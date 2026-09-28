@@ -1,6 +1,6 @@
 # Design section 7 (observability) and section 5 (SLA detection): metrics values, the
 # database gauges computed on scrape, and structured logs that never carry patient content
-# (CLAUDE.md non-negotiable 9).
+# (design section 7, "No patient content anywhere in the telemetry").
 import io
 import json
 import logging

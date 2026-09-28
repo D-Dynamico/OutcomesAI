@@ -133,8 +133,8 @@ def test_results_out_of_order(api, db, mock, make_worker):
 
 
 def test_no_transaction_or_lock_held_during_the_call(api, db, mock, make_worker):
-    # Non-negotiables 4 and 6: the attempt row is committed before the call, and nothing
-    # is held in the database while the call runs
+    # Design section 5, "Why the call cannot sit inside a transaction": the attempt row is
+    # committed before the call, and nothing is held in the database while the call runs
     ev = make_event()
     post(api, ev)
     observed = {}
