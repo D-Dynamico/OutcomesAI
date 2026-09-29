@@ -1,6 +1,6 @@
 # Operations
 
-Metrics, alerts, logs, triage, configuration, and a walkthrough of retry exhaustion and redrive. For the overview, see the [README](../README.md). Metric and log design decisions are in [D10 and D27](../DECISIONS.md).
+Metrics, alerts, logs, triage and configuration. For the overview, see the [README](../README.md). Metric and log design decisions are in [D10 and D27](../DECISIONS.md).
 
 ## Metrics
 
@@ -92,43 +92,6 @@ Every value can be set from the environment, and Compose passes them through fro
 - `summary_jobs{status}` counts the whole table on every scrape. That's fine at this scale; at high volume it would need an index or a sampled count (D27).
 - Worker metrics are per process, so a Prometheus deployment would discover the replicas through the `worker` service's DNS name.
 
-## Demo: retry exhaustion and redrive
+## Demos
 
-A job fails only when its own retry budget runs out, for example when the service is only partly degraded and the breaker correctly stays closed. To see it in seconds instead of minutes, shrink the backoff:
-
-```sh
-docker compose down -v
-BACKOFF_BASE_SECONDS=1 docker compose up -d --build --wait
-curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' \
-  -d '{"failure_rate": 1, "latency_min_seconds": 0.1, "latency_max_seconds": 0.3, "timeout_hang_seconds": 0}'
-curl -X POST localhost:8000/encounters/events -H 'content-type: application/json' -d '{"event_id":"evt-500","encounter_id":"enc-500","patient_id":"pat-5","encounter_type":"MedicationRefill","version":1,"payload":{"transcription":"Nurse: Hi, this is the refill line. Patient: I need to refill my metformin."}}'
-sleep 25
-curl localhost:8000/encounters/enc-500/summary
-```
-
-The job has exhausted its budget. `attempts` and `error_class` come from `job_attempts`, counting only the current redrive generation:
-
-```json
-{"encounter_id":"enc-500","patient_id":"pat-5","encounter_type":"MedicationRefill","current_version":1,"status":"failed","summary":null,"attempts":5,"error_class":"rate_limited","accepted_at":"2026-09-28T13:18:53Z","completed_at":"2026-09-28T13:19:02Z","sla_breached":true}
-```
-
-The attempt history shows the cost of every call, with no patient content:
-
-```sh
-docker compose exec db psql -U outcomes -c \
-  "select attempt_no, redrive_generation, outcome, error_class from job_attempts where job_id = 1 order by attempt_no"
-#  1 | 0 | transient_error | rate_limited
-#  2 | 0 | transient_error | ai_timeout
-#  3 | 0 | transient_error | ai_unavailable
-#  4 | 0 | transient_error | ai_unavailable
-#  5 | 0 | transient_error | rate_limited
-```
-
-Fix the provider, then redrive:
-
-```sh
-curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -d '{"failure_rate": 0}'
-curl -X POST localhost:8000/admin/jobs/1/redrive      # {"job_id":1,"outcome":"redriven"}
-curl localhost:8000/encounters/enc-500/summary        # "status":"ready" ... "sla_breached":true
-#  (job_attempts now adds)  6 | 1 | succeeded |
-```
+The AI outage, retry exhaustion and redrive run as scripts, with their captured output, in [the review guide](REVIEW_GUIDE.md#scenario-7-ai-outage-and-retry-exhaustion).

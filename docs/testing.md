@@ -49,4 +49,4 @@ Assertions are made on stored state, HTTP responses and mock call counts, never 
 
 ## Caveat: shared mock-ai counters
 
-`mock-ai` is shared with the dev stack, so the end-to-end smoke test compares its call counts before and after. If the dev stack's workers are busy while it runs (for example straight after the outage demo), the counts can be disturbed. Let the demo finish, or stop the dev workers, before running `make test`.
+`mock-ai` is shared with the dev stack, so the end-to-end smoke test compares its call counts before and after. If the dev stack's workers are busy while it runs (for example while [`scripts/scenario_ai_outage.sh`](../scripts/scenario_ai_outage.sh) runs), the counts can be disturbed. Let the scenario finish, or stop the dev workers, before running `make test`.

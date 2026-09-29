@@ -1,5 +1,7 @@
 # Reliable Encounter Updates & AI Summaries
 
+> **Evaluating this? Start with [docs/REVIEW_GUIDE.md](docs/REVIEW_GUIDE.md).** Each failure scenario from the brief runs as one command, with the output to expect and what it proves.
+
 A backend service that receives clinical encounter updates from a partner system, stores the latest version of each encounter, and generates an AI summary of it in the background.
 
 This is the working implementation of the design I submitted for the Backend Engineer / Clinical AI exercise. The full design is in [`docs/design.md`](docs/design.md), and every place the code interprets or departs from it is recorded in [`DECISIONS.md`](DECISIONS.md).
@@ -19,12 +21,12 @@ Both sides of the service are unreliable. The partner sends the same update twic
 
 The first three rest on Postgres itself: unique constraints decide duplicates, a compare-and-swap update stops regressions, and each accepted update and its summary job commit in one transaction. The outage bound comes from retry budgets and a circuit breaker shared across workers. Each guarantee has a test that forces the race, crash, or outage it protects against; [`docs/guarantees.md`](docs/guarantees.md) maps every one to its mechanism and test.
 
-**Contents:** [5-minute tour](#5-minute-tour) · [Quick start](#quick-start) · [How it works](#how-it-works) · [API](#api) · [Demo: AI outage](#demo-a-20-minute-ai-outage) · [Tests](#tests) · [Departures from the design](#departures-from-the-design) · [Limitations](#known-limitations)<br>
-**More:** [guarantees and code map](docs/guarantees.md) · [operations](docs/operations.md) · [testing](docs/testing.md) · [decisions](DECISIONS.md)
+**Contents:** [5-minute tour](#5-minute-tour) · [Quick start](#quick-start) · [How it works](#how-it-works) · [API](#api) · [Tests](#tests) · [Departures from the design](#departures-from-the-design) · [Limitations](#known-limitations)<br>
+**More:** [review guide](docs/REVIEW_GUIDE.md) · [guarantees and code map](docs/guarantees.md) · [operations](docs/operations.md) · [testing](docs/testing.md) · [decisions](DECISIONS.md)
 
 ## 5-minute tour
 
-1. **Run it, break it, prove it:** the [Quick start](#quick-start), then the [AI outage demo](#demo-a-20-minute-ai-outage), then `make test` for the [seven headline tests](#tests).
+1. **Run it, break it, prove it:** the [review guide's 5-minute essentials](docs/REVIEW_GUIDE.md#1-before-you-start). Each scenario script triggers one of the brief's failures and prints the responses and stored state. Then run `make test` for the [seven headline tests](#tests).
 2. **Read the core, in this order:**
 
    | File | What it holds | Design section |
@@ -44,6 +46,7 @@ git clone https://github.com/D-Dynamico/OutcomesAi.git && cd OutcomesAi
 docker compose up --build -d --wait         # or: make up (waits until healthy)
 curl localhost:8000/healthz                 # {"status":"ok"}
 make test                                   # full suite against a real Postgres (~2 min)
+scripts/scenario_late_version.sh            # one of the brief's failure scenarios, end to end
 ```
 
 The schema is applied at startup under an advisory lock, so start order doesn't matter. Without `make` (for example on Windows), use the plain commands in [`docs/testing.md`](docs/testing.md#running) and the [`Makefile`](Makefile).
@@ -138,34 +141,7 @@ curl -X POST localhost:8000/admin/jobs/1/redrive
 # {"job_id":1,"outcome":"superseded","superseded_by_version":13}   encounter moved on: never paid for
 ```
 
-`POST /admin/jobs/redrive` with `{"failed_from", "failed_to"}` does the same for every job that failed in a time window. A full walkthrough, from a job failing to its redrive, is in [`docs/operations.md`](docs/operations.md#demo-retry-exhaustion-and-redrive).
-
-## Demo: a 20-minute AI outage
-
-Design §6.7 with production defaults (30 s breaker cooldown), 3 worker containers and 40 jobs. **Paste it in three parts, pausing where the comments say.** Pasted in one go, the outage ends before any probe is sent. To run it again, start with `docker compose down -v`.
-
-```sh
-# Part 1: start, switch the AI into an outage, post 40 encounters
-docker compose up -d --build --wait --scale worker=3
-curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -d '{"outage": true}'
-for i in $(seq 1 40); do
-  curl -s -o /dev/null -X POST localhost:8000/encounters/events -H 'content-type: application/json' \
-    -d "{\"event_id\":\"evt-o$i\",\"encounter_id\":\"enc-o$i\",\"patient_id\":\"pat-$i\",\"encounter_type\":\"TelephoneTriage\",\"version\":1,\"payload\":{\"transcription\":\"Nurse: call $i\"}}"
-done
-# Part 2: repeat these two every ~30 s for ~90 s: the breaker stays open, probes climb, real calls stay flat
-curl -s localhost:8000/metrics | grep -E '^(breaker_state|breaker_probes_sent_total|summary_jobs\{)'
-curl -s localhost:8001/admin/stats
-# Part 3: end the outage, then repeat part 2 until 40 are ready (1-2 min: the breaker closes at the next probe, then the queue drains)
-curl -X POST localhost:8001/admin/settings -H 'content-type: application/json' -d '{"outage": false}'
-```
-
-| When | Breaker | Jobs | Provider calls |
-|---|---|---|---|
-| t = 5 s | `open` | 40 queued | **12 real**, all failed (tripped at 11, plus 1 in flight) |
-| t = 65 s | `open`, 2 probes sent | 40 queued, all breaching the SLA | still 12 real, **2 synthetic probes** |
-| outage off, then drained | `closed` after the next probe | **40 ready, 0 failed** | 52 real (12 failed + 40 succeeded), 3 probes |
-
-GET showed `processing` with `sla_breached: true` throughout, and POSTs were accepted normally. Without the breaker, 40 jobs could each have spent 5 attempts: up to 200 paid calls.
+`POST /admin/jobs/redrive` with `{"failed_from", "failed_to"}` does the same for every job that failed in a time window. For a full walkthrough, from a job failing to its redrive, see [scenario 7b in the review guide](docs/REVIEW_GUIDE.md#7b-retry-exhaustion-inspection-and-redrive).
 
 ## Tests
 

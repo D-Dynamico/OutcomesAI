@@ -51,7 +51,7 @@ services:
       MOCK_OUTAGE: ${MOCK_OUTAGE:-false}
     command: ["uvicorn", "app.mockai.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001"]
     ports:
-      - "8001:8001"   # published so the outage switch can be flipped from the host (demo)
+      - "${MOCK_AI_PORT:-8001}:8001"   # published so the outage switch can be flipped from the host (demo)
     healthcheck:
       <<: *healthcheck-http
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz')"]
@@ -62,7 +62,7 @@ services:
     environment:
       <<: *app-env
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
