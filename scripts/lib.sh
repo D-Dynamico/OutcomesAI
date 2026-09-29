@@ -28,13 +28,25 @@ post_event() {
   printf 'POST v%-3s %s -> ' "$5" "$1"
   show -X POST "$API/encounters/events" -H 'content-type: application/json' -d "$(event_json "$@")"
 }
+# GET, condensed to the fields that change between states. VERBOSE=1 prints the whole body.
 get_summary() {
-  printf 'GET  %s -> ' "$1"
-  show "$API/encounters/$1/summary"
+  local out code body key value
+  out=$(curl -s -w '\n%{http_code}' "$API/encounters/$1/summary")
+  code=${out##*$'\n'}; body=${out%$'\n'*}
+  if [ -n "${VERBOSE:-}" ]; then
+    printf 'GET  %s -> %s %s\n' "$1" "$code" "$body"
+    return
+  fi
+  printf 'GET  %s -> %s' "$1" "$code"
+  for key in status current_version summary_version attempts error_class sla_breached; do
+    value=$(grep -o "\"$key\":[^,}]*" <<<"$body" | head -1 | cut -d: -f2- | tr -d '"' || true)
+    [ -n "$value" ] && printf ' %s=%s' "$key" "$value"
+  done
+  echo
 }
 
-# SQL as a table, or as a bare value
-sql() { docker compose exec -T db psql -U outcomes -d outcomes -P footer=off -c "$1"; }
+# SQL as a table (blank lines dropped), or as a bare value
+sql() { docker compose exec -T db psql -U outcomes -d outcomes -P footer=off -c "$1" | grep -v '^$'; }
 sql_value() { docker compose exec -T db psql -U outcomes -d outcomes -Atc "$1"; }
 
 # wait_for "SQL returning one value" EXPECTED TIMEOUT_SECONDS

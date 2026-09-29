@@ -23,5 +23,5 @@ printf 'log lines containing the patient ID: %s\n' "$(grep -c -- "$PATIENT" <<<"
 printf 'metrics lines containing any of them: %s\n' \
   "$(curl -s "$API/metrics" | grep -cE -- "$MARKER|$PATIENT|$ENC" || true)"
 
-step "What the logs do say about this encounter, in time order"
-grep -- "$ENC" <<<"$LOGS" | sort
+step "What the logs do say: IDs, statuses and durations"
+grep -- "$ENC" <<<"$LOGS" | grep result_written

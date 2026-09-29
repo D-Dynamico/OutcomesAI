@@ -20,6 +20,5 @@ wait_for "$(job_status "$ENC" 10)" superseded 30
 get_summary "$ENC"
 
 step "Stored state: current_version 12, v11 never stored, v10's job superseded"
-sql "SELECT encounter_id, current_version FROM encounters WHERE encounter_id = '$ENC'"
-sql "SELECT version, event_id FROM encounter_events WHERE encounter_id = '$ENC' ORDER BY version"
-sql "SELECT version, status, superseded_by_version FROM summary_jobs WHERE encounter_id = '$ENC' ORDER BY version"
+sql "SELECT e.current_version, j.version, j.status, j.superseded_by_version
+       FROM encounters e JOIN summary_jobs j USING (encounter_id) WHERE e.encounter_id = '$ENC' ORDER BY j.version"

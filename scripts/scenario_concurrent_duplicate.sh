@@ -27,4 +27,3 @@ step "Stored state: one event and one job per version"
 sql "SELECT ev.version, count(DISTINCT ev.event_id) AS events, count(DISTINCT j.job_id) AS jobs
        FROM encounter_events ev JOIN summary_jobs j USING (encounter_id, version)
       WHERE ev.encounter_id = '$ENC' GROUP BY ev.version ORDER BY ev.version"
-sql "SELECT encounter_id, patient_id, current_version FROM encounters WHERE encounter_id = '$ENC'"

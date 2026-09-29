@@ -8,14 +8,14 @@ mock_set '{"failure_rate": 0, "slow_rate": 0}'
 step "Health"
 printf 'GET  /healthz -> '; show "$API/healthz"
 
-step "Schema: five tables"
-sql "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
+step "Schema applied at startup"
+sql_value "SELECT string_agg(tablename, ', ' ORDER BY tablename) FROM pg_tables WHERE schemaname = 'public'"
 
 step "One encounter, accepted, then summarised in the background"
 post_event "evt-verify-$RUN" "$ENC" pat-33 Appointment 1 "Nurse: Good morning. How have you been feeling since your last visit? Patient: Pretty good overall, but a little more tired than usual."
 get_summary "$ENC"
 wait_for "$(job_status "$ENC" 1)" ready 30
-get_summary "$ENC"
+VERBOSE=1 get_summary "$ENC"   # the full body once; the other scripts print a condensed GET
 
 step "Validation happens before any database work"
 printf 'POST version 0   -> '

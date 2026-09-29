@@ -10,20 +10,21 @@ require_new "$PREFIX-1"
 mock_set '{"failure_rate": 0, "slow_rate": 0}'
 
 snapshot() {
-  printf 't=%3ss  breaker: %-9s probes_sent=%s  jobs: %-33s mock-ai: %s\n' "$((SECONDS - START))" \
+  local stats; stats=$(curl -s "$MOCK/admin/stats")
+  printf 't=%3ss  breaker=%-9s probes_sent=%s  jobs: %-20s mock-ai calls: real=%s probe=%s\n' "$((SECONDS - START))" \
     "$(sql_value "SELECT state FROM circuit_breaker")" \
     "$(sql_value "SELECT probes_sent FROM circuit_breaker")" \
     "$(sql_value "SELECT string_agg(status || '=' || n, ' ' ORDER BY status) FROM (
                     SELECT status::text, count(*) AS n FROM summary_jobs
                      WHERE encounter_id LIKE '$PREFIX-%' GROUP BY 1) s")" \
-    "$(curl -s "$MOCK/admin/stats")"
+    "$(grep -o '"real":[0-9]*' <<<"$stats" | cut -d: -f2)" "$(grep -o '"probe":[0-9]*' <<<"$stats" | cut -d: -f2)"
 }
 
 step "Three worker containers: 12 worker loops"
 compose up -d --wait --scale worker=3 worker
 
 step "Reset mock-ai's call counters and switch it into an outage"
-curl -s -X POST "$MOCK/admin/reset"; echo
+curl -s -o /dev/null -X POST "$MOCK/admin/reset"
 mock_set '{"outage": true}'
 START=$SECONDS
 
@@ -41,20 +42,14 @@ done
 
 step "What a client and the metrics show during the outage"
 get_summary "$PREFIX-1"
-curl -s "$API/metrics" | grep -E '^(breaker_state|breaker_probes_sent_total|summary_sla_breaching_jobs|summary_jobs\{status="(queued|failed)"\})'
+curl -s "$API/metrics" | grep -E '^(breaker_state\{state="open"\}|summary_sla_breaching_jobs |summary_jobs\{status="failed"\})'
 
 step "End the outage. The next probe closes the breaker, then the queue drains"
 mock_set '{"outage": false}'
-until [ "$(sql_value "SELECT count(*) FROM summary_jobs WHERE encounter_id LIKE '$PREFIX-%' AND status = 'ready'")" = 40 ]; do
-  snapshot
-  [ $((SECONDS - START)) -lt 360 ] || { echo "Timed out waiting for 40 ready" >&2; exit 1; }
-  sleep 10
-done
+wait_for "SELECT count(*) FROM summary_jobs WHERE encounter_id LIKE '$PREFIX-%' AND status = 'ready'" 40 300
 snapshot
-get_summary "$PREFIX-1"
 
-step "Stored state: every job ready, none failed; real calls per outcome"
-sql "SELECT status, count(*) FROM summary_jobs WHERE encounter_id LIKE '$PREFIX-%' GROUP BY status"
+step "Stored state: every paid call on these 40 jobs, by outcome"
 sql "SELECT a.outcome, a.error_class, count(*) FROM job_attempts a JOIN summary_jobs j USING (job_id)
       WHERE j.encounter_id LIKE '$PREFIX-%' GROUP BY 1, 2 ORDER BY 1"
 
