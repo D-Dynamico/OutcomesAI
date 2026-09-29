@@ -4,7 +4,7 @@
 
 A backend service that receives clinical encounter updates from a partner system, stores the latest version of each encounter, and generates an AI summary of it in the background.
 
-This is the working implementation of the design I submitted for the Backend Engineer / Clinical AI exercise. The full design is in [`docs/design.md`](docs/design.md), and every place the code interprets or departs from it is recorded in [`DECISIONS.md`](DECISIONS.md).
+This is the working implementation of the design I submitted for the Backend Engineer / Clinical AI exercise. The full design is in [`docs/design.md`](docs/design.md), and every place the code interprets or departs from it is recorded in [`DECISIONS.md`](DECISIONS.md). The exercise brief was provided privately, so it isn't included here.
 
 ## The problem
 

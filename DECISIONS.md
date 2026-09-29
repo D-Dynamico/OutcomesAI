@@ -95,7 +95,7 @@ The design reads and updates the `'generate_summary'` row but never inserts it. 
 ## D13. Document locations
 **Touches:** repository layout.
 
-`encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. The original brief is `docs/BE_ClinicalAI_T_Encounters.pdf`. All three are committed, so a reviewer can check every section reference against the spec.
+`encounter-summaries-design.md` was moved to `docs/design.md`, and the submitted report to `docs/submission.pdf`. Both are committed, so a reviewer can check every section reference against the spec. The original brief was provided privately and is not included.
 
 ## D14. Error bodies for 400, 413 and 500
 **Touches:** section 3 ("Before the transaction"), section 4 (POST).

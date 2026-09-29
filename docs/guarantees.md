@@ -66,5 +66,5 @@ app/
     mock.py            scriptable in-process mock for tests
   mockai/main.py       the mock-ai service
 tests/                 harness.py, factories.py, conftest.py, test_*.py
-docs/                  design.md (the spec), the brief, the submitted PDF, these docs
+docs/                  design.md (the spec), the submitted PDF, these docs
 ```

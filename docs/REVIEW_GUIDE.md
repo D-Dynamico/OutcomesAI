@@ -82,7 +82,7 @@ docker compose run --rm api python -m pytest -k '<expression>'
 
 ### Scenario 1: Concurrent duplicate
 
-> *Two service instances receive the same event concurrently.*
+**The situation:** the partner delivers the same event to two API instances at the same moment.
 
 ```sh
 scripts/scenario_concurrent_duplicate.sh
@@ -110,7 +110,7 @@ Ten parallel requests to one API are an approximation. `test_1` makes the race c
 
 ### Scenario 2: Missing or late version
 
-> *Version 12 arrives while version 10 is stored. Version 11 arrives later, or never arrives.*
+**The situation:** a newer version skips ahead of the stored one, and the version in between turns up late or not at all.
 
 ```sh
 scripts/scenario_late_version.sh
@@ -145,7 +145,7 @@ Depending on timing, v10's job was either skipped before any paid call, or its i
 
 ### Scenario 3: Crash after saving
 
-> *The encounter update is saved, but the service crashes before handing work to the summary worker.*
+**The situation:** the API dies right after saving an update, before any worker has picked up the work.
 
 ```sh
 scripts/scenario_crash_after_saving.sh
@@ -183,7 +183,7 @@ GET  enc-crash-1 -> 200 status=ready current_version=1 summary_version=1 sla_bre
 
 ### Scenario 4: Worker interruption
 
-> *A worker crashes during processing, or after saving a result but before acknowledging the job.*
+**The situation:** a worker dies mid-call, or between writing its result and marking the job done.
 
 ```sh
 scripts/scenario_worker_interruption.sh
@@ -219,7 +219,7 @@ GET  enc-interrupt-1 -> 200 status=ready current_version=1 summary_version=1 sla
 
 ### Scenario 5: Newer version during processing
 
-> *Version 12 is actively being summarized when version 13 arrives. What happens to version 12's work and result?*
+**The situation:** a newer version is accepted while the previous one's summary call is still running.
 
 ```sh
 scripts/scenario_newer_version_during_processing.sh
@@ -254,7 +254,7 @@ GET  enc-newer-1 -> 200 status=ready current_version=13 summary_version=13 sla_b
 
 ### Scenario 6: Results out of order
 
-> *Version 13 finishes summarizing before version 12.*
+**The situation:** the newer version's summary finishes before the older one's.
 
 ```sh
 scripts/scenario_results_out_of_order.sh
@@ -288,7 +288,7 @@ The script forces the order through mock-ai, which picks each call's latency as 
 
 ### Scenario 7: AI outage and retry exhaustion
 
-> *The AI service is unavailable for 20 minutes. Explain backoff and retry behavior … what happens when the retry policy is exhausted, how failed work can be inspected or safely redriven, and what the client sees throughout.*
+**The situation:** the AI provider is down for a long stretch. What do retries cost, what happens when they run out, how is failed work inspected and redriven, and what does the client see meanwhile?
 
 These are two different situations:
 
@@ -408,7 +408,7 @@ Bulk redrive, for everything that failed in a time window, takes `POST /admin/jo
 
 ### Scenario 8: Inconsistent identity fields
 
-> *An event for an existing `encounter_id` arrives with a different `patient_id` or `encounter_type` than previously stored.*
+**The situation:** a later event for an encounter carries a different patient or encounter type from the stored one.
 
 ```sh
 scripts/scenario_identity_conflict.sh

@@ -9,7 +9,7 @@ The service ingests versioned clinical encounter updates from a partner (duplica
 ## Source of truth
 
 - `docs/design.md` is the spec. Read it fully before writing code. It has the exact schema, SQL for every state transition, the API contract with example bodies, and the reasoning behind each decision.
-- `docs/BE_ClinicalAI_T_Encounters.pdf` is the original exercise (the brief), for context only.
+- The original exercise (the brief) was provided privately and is not in this repository.
 - The submitted PDF (`docs/submission.pdf`) is a condensed version of `docs/design.md`. Where they differ, **`docs/design.md` wins**. Known differences: the PDF's DDL omits `payload_hash` and the `circuit_breaker` table, and its scenario G omits the breaker's 10-minute window. Implement the md.
 
 If the design is ambiguous, contradictory, or missing something you need, do not improvise silently. Pick the option most consistent with the rest of the design, implement it, and record it in `DECISIONS.md` (what, why, which section of the design it touches). If the choice would change the API contract or a correctness guarantee, stop and ask me instead.
